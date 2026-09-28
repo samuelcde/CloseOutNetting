@@ -1,0 +1,8 @@
+msal
+requests
+python-dotenv
+urllib3
+pandas
+openpyxl
+xlrd
+msoffcrypto-tool

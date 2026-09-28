@@ -1,0 +1,139 @@
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+xmlns:x="urn:schemas-microsoft-com:office:excel"
+xmlns="http://www.w3.org/TR/REC-html40">
+
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name=ProgId content=Excel.Sheet>
+<meta name=Generator content="Microsoft Excel 9">
+<!--[if gte mso 9]><xml>
+ <o:DocumentProperties>
+  <o:Author>Authorized User</o:Author>
+  <o:LastAuthor>Authorized User</o:LastAuthor>
+  <o:Created>2002-01-04T16:06:43Z</o:Created>
+  <o:LastSaved>2002-01-04T16:14:46Z</o:LastSaved>
+  <o:Company>Goldman Sachs</o:Company>
+  <o:Version>9.4402</o:Version>
+ </o:DocumentProperties>
+ <o:OfficeDocumentSettings>
+  <o:DownloadComponents/>
+ </o:OfficeDocumentSettings>
+</xml><![endif]-->
+<style>
+<!--table
+   {mso-displayed-decimal-separator:"\.";
+   mso-displayed-thousand-separator:"\,";}
+@page
+   {margin:1.0in .75in 1.0in .75in;
+   mso-header-margin:.5in;
+   mso-footer-margin:.5in;}
+tr
+   {mso-height-source:auto;}
+col
+   {mso-width-source:auto;}
+br
+   {mso-data-placement:same-cell;}
+.style0
+   {mso-number-format:General;
+   text-align:general;
+   vertical-align:bottom;
+   mso-rotate:0;
+   mso-background-source:auto;
+   mso-pattern:auto;
+   color:windowtext;
+   font-size:10.0pt;
+   font-weight:400;
+   font-style:normal;
+   text-decoration:none;
+   font-family:Arial;
+   mso-generic-font-family:auto;
+   mso-font-charset:0;
+   border:none;
+   mso-protection:locked visible;
+   mso-style-name:Normal;
+   mso-style-id:0;}
+td
+   {mso-style-parent:style0;
+   padding-top:1px;
+   padding-right:1px;
+   padding-left:1px;
+   mso-ignore:padding;
+   color:windowtext;
+   font-size:10.0pt;
+   font-weight:400;
+   font-style:normal;
+   text-decoration:none;
+   font-family:Arial;
+   mso-generic-font-family:auto;
+   mso-font-charset:0;
+   mso-number-format:General;
+   text-align:general;
+   vertical-align:bottom;
+   border:none;
+   mso-background-source:auto;
+   mso-pattern:auto;
+   mso-protection:locked visible;
+   white-space:nowrap;
+   mso-rotate:0;}
+.x124
+   {mso-style-parent:style0;
+   text-align:center;}
+.x125
+   {mso-style-parent:style0;}
+.x126
+   {mso-style-parent:style0;
+   mso-number-format:"m\/d\/yyyy";
+   text-align:right;}
+.x127
+   {mso-style-parent:style0;
+   text-align:right;}
+.x128
+   {mso-style-parent:style0;
+   white-space:normal;}
+.x129
+   {mso-style-parent:style0;
+   vertical-align:top;
+   white-space:normal;}
+.x130
+   {mso-style-parent:style0;
+   vertical-align:top;
+   text-align:right;
+   white-space:normal;}
+.x131
+   {mso-style-parent:style0;
+   white-space:nowrap;}
+tr.x132 td
+   {mso-number-format:\@;}
+-->
+</style>
+<!--[if gte mso 9]><xml>
+ <x:ExcelWorkbook>
+  <x:ExcelWorksheets>
+   <x:ExcelWorksheet>
+    <x:Name>Sheet1</x:Name>
+    <x:WorksheetOptions>
+     <x:Selected/>
+     <x:ProtectContents>False</x:ProtectContents>
+     <x:ProtectObjects>False</x:ProtectObjects>
+     <x:ProtectScenarios>False</x:ProtectScenarios>
+    </x:WorksheetOptions>
+   </x:ExcelWorksheet>
+  </x:ExcelWorksheets>
+  <x:WindowHeight>10110</x:WindowHeight>
+  <x:WindowWidth>18060</x:WindowWidth>
+  <x:WindowTopX>360</x:WindowTopX>
+  <x:WindowTopY>30</x:WindowTopY>
+  <x:ProtectStructure>False</x:ProtectStructure>
+  <x:ProtectWindows>False</x:ProtectWindows>
+ </x:ExcelWorkbook>
+</xml><![endif]-->
+</head>
+
+<body>
+
+<table border=0 cellpadding=0 cellspacing=0 style='border-collapse:collapse;table-layout:fixed'>
+<TR><TD colspan="11"><TABLE><TR class="x132"><TD align="right"><FONT size+=2><B></B></FONT></TD></TR></TABLE></TD></TR>
+<TR class="x132"><TD class=x129>All Accounts <br>
+09/10/2026</TD><TD class=x130 colspan="10"><B>COLOMBIA</B></TD></TR>
+<TR><TD class=x124 colspan=1 rowspan=1><B>Instrument</B></TD><TD class=x124 colspan=1 rowspan=1><B>CCP</B></TD><TD class=x124 colspan=1 rowspan=1><B>Trade Date</B></TD><TD class=x124 colspan=1 rowspan=1><B>Currency</B></TD><TD class=x124 colspan=1 rowspan=1><B>Notional</B></TD><TD class=x124 colspan=1 rowspan=1><B>Effective Date</B></TD><TD class=x124 colspan=1 rowspan=1><B>Maturity Date</B></TD><TD class=x124 colspan=1 rowspan=1><B>Fixed Rate</B></TD><TD class=x124 colspan=1 rowspan=1><B>Deal Spread</B></TD><TD class=x124 colspan=1 rowspan=1><B>Day Count Fraction</B></TD><TD class=x124 colspan=1 rowspan=1><B>GS Trade ID</B></TD></TR>
+<TR><TD colspan=11 class=x128>This disclaimer shall apply to the report ("Report") which Goldman Sachs, as defined below, is providing to you in respect of your transactions held in an account ("Account") with Goldman Sachs. This Report is provided for your internal use and information only. It is not an official account statement and should not be relied upon as an accurate description of your Account. If there is any discrepancy between this Report and your official Account statement, the official Account statement shall prevail. Please report any discrepancies or errors in this Report immediately to your Goldman Sachs representative orally and/or in writing (where applicable) in accordance with the legal agreement governing your Account ("Account Agreement"). In no circumstance shall Goldman Sachs be liable for any losses, damages, claims, costs or expenses of any kind whatsoever incurred or suffered by you in connection with this Report, including as a result of your use of, or reliance on, this Report. This Report is subject to and governed by the terms of your Account Agreement and in the event of any conflict, the terms of your Account Agreement shall prevail. "Goldman Sachs" shall mean Goldman Sachs & Co. LLC, Goldman Sachs International, or any affiliate of The Goldman Sachs Group, Inc.</TD></TR></TABLE></BODY></HTML>
