@@ -4,6 +4,8 @@ import argparse
 import logging
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.config import (
     STATE_DIR,
@@ -76,6 +78,42 @@ def main() -> int:
 
                 try:
                     config = load_operational_config()
+
+                    now_local = datetime.now(
+                        ZoneInfo(config.timezone)
+                    ) 
+
+                    # Monday = 0
+                    # Tuesday = 1
+                    # Wednesday = 2 
+                    # Thursday = 3
+                    # Friday = 4
+                    # Saturday = 5
+                    # Sunday = 6
+
+                    if now_local.weekday() >= 5:
+                        logger.info(
+                            "Fin de semana detectado (%s). "
+                            "No se ejecutará el procesamiento.",
+                            now_local.strftime("%d/%m/%Y %H:%M:%S"),
+                        )
+                        
+                        wait_seconds = (
+                            config.poll_interval_minutes
+                            * 60
+                        )
+
+                        logger.info(
+                            "Próxima verificación en %s minutos.",
+                            config.poll_interval_minutes,
+                        )
+
+                        logger.info(
+                            "---------------------------------------------"
+                        )
+
+                        time.sleep(wait_seconds)
+                        continue
 
                     process_cycle(
                         settings,

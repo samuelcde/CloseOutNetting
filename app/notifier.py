@@ -696,7 +696,7 @@ class EmailNotifier:
             raise NotificationError("El servidor SMTP rechazó " "uno o más destinatarios.") from exc
 
         except smtplib.SMTPSenderRefused as exc:
-            raise NotificationError(
+            raise NotificationError(  
                 "El servidor SMTP rechazó "
                 "el remitente configurado."
             ) from exc
