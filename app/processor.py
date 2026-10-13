@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from .auth import get_access_token
+from .business_normalizer import save_report_data
 from .config import OperationalConfig, Settings
 from .db import (
     find_by_content_sha256,
@@ -16,14 +17,16 @@ from .db import (
     mark_processed,
 )
 from .entities import get_sender_address, resolve_entity
-from .exceptions import AttachmentTooLargeError, ReportParseError, SecurityValidationError
-from .fingerprint import build_report_content_sha256
-from .graph_api import (
-    GraphClient,
-    build_previous_business_day_window,
+from .exceptions import (
+    AttachmentTooLargeError,
+    ReportParseError,
+    SecurityValidationError,
 )
+from .fingerprint import build_report_content_sha256
+from .graph_api import GraphClient, build_previous_business_day_window
 from .notifier import DailyProcessSummary, EmailNotifier, NotificationError
 from .parser import parse_report
+from .postgres_db import register_ingestion_file, set_ingestion_status
 from .security import avoid_file_collision, build_safe_destination, sanitize_filename
 
 
@@ -31,17 +34,21 @@ logger = logging.getLogger(__name__)
 
 
 def _safe_notify(description: str, action: Callable[[], None]) -> None:
-    """
-    Ejecuta una notificación sin permitir que un fallo SMTP
-    detenga el procesamiento principal.
-    """
+    """Envía una notificación sin detener el proceso si falla SMTP."""
 
     try:
         action()
     except NotificationError as exc:
-        logger.error("No fue posible enviar la notificación SMTP '%s': %s", description, exc)
+        logger.error(
+            "No fue posible enviar la notificación SMTP '%s': %s",
+            description,
+            exc,
+        )
     except Exception:
-        logger.exception("Error inesperado enviando la notificación SMTP '%s'.", description)
+        logger.exception(
+            "Error inesperado enviando la notificación SMTP '%s'.",
+            description,
+        )
 
 
 def _existing_local_path(value: str | None) -> Path | None:
@@ -74,31 +81,67 @@ def _resolve_final_destination(
     )
 
 
+def _register_ingestion_outcome(
+    *,
+    entity: str,
+    filename: str,
+    source_path: str | Path | None,
+    message_id: str,
+    attachment_id: str,
+    file_sha256: str,
+    content_sha256: str | None,
+    size_bytes: int,
+    status: str,
+) -> int:
+    """Registra el archivo en ingestion_files y deja su estado final."""
+
+    ingestion_id = register_ingestion_file(
+        entity=entity,
+        source_filename=filename,
+        source_path=source_path,
+        message_id=message_id,
+        attachment_id=attachment_id,
+        file_sha256=file_sha256,
+        content_sha256=content_sha256,
+        size_bytes=size_bytes,
+    )
+
+    set_ingestion_status(
+        ingestion_id=ingestion_id,
+        status=status,
+        content_sha256=content_sha256,
+    )
+
+    return ingestion_id
+
+
 def process_cycle(settings: Settings, config: OperationalConfig) -> int:
     """
     Ejecuta un ciclo completo de Auto CloseNetting.
 
-    El correo de resumen se intenta enviar SIEMPRE:
-        - con archivos nuevos;
-        - sin archivos nuevos;
-        - con adjuntos ya procesados;
-        - con incidencias;
-        - ante un error general del ciclo.
+    El correo de resumen se intenta enviar siempre, incluso si no hay
+    archivos nuevos o si se presentan incidencias durante el ciclo.
     """
 
     started_at = datetime.now()
     target_date = None
+
     messages_reviewed = 0
     downloaded = 0
     files_parsed = 0
+    files_saved_to_database = 0
     duplicate_files = 0
     unknown_entity_files = 0
     oversized_files = 0
     parse_errors = 0
+
     cycle_incidents: list[str] = []
     cycle_error: Exception | None = None
 
-    notifier = EmailNotifier(smtp_settings=settings.smtp, recipients=config.alert_recipients)
+    notifier = EmailNotifier(
+        smtp_settings=settings.smtp,
+        recipients=config.alert_recipients,
+    )
 
     logger.info("============================================================")
     logger.info("===== INICIO CICLO AUTO CLOSENETTING =====")
@@ -292,10 +335,40 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             " | Motivo: dominio no configurado"
                         )
 
+                    # ========================================================
+                    # DUPLICADO BINARIO
+                    # ========================================================
+
                     binary_match = find_by_file_sha256(entity, sha256)
+
                     if binary_match is not None:
                         duplicate_files += 1
                         staging_destination.unlink(missing_ok=True)
+
+                        try:
+                            _register_ingestion_outcome(
+                                entity=entity,
+                                filename=filename,
+                                source_path=binary_match.local_path,
+                                message_id=message_id,
+                                attachment_id=attachment_id,
+                                file_sha256=sha256,
+                                content_sha256=binary_match.content_sha256,
+                                size_bytes=size_bytes,
+                                status="duplicate_binary",
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "No fue posible registrar el duplicado binario "
+                                "en PostgreSQL: %s",
+                                filename,
+                            )
+                            cycle_incidents.append(
+                                "ERROR BASE DE DATOS"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                f" | Motivo: {type(exc).__name__}: {exc}"
+                            )
 
                         mark_processed(
                             message_id=message_id,
@@ -325,6 +398,10 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         )
                         continue
 
+                    # ========================================================
+                    # PARSEO
+                    # ========================================================
+
                     try:
                         report = parse_report(
                             staging_destination,
@@ -334,12 +411,38 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         )
                     except ReportParseError as exc:
                         parse_errors += 1
+
                         final_destination = _resolve_final_destination(
                             base_destination,
                             attachment_id,
                             sha256,
                         )
                         os.replace(staging_destination, final_destination)
+
+                        try:
+                            _register_ingestion_outcome(
+                                entity=entity,
+                                filename=filename,
+                                source_path=final_destination,
+                                message_id=message_id,
+                                attachment_id=attachment_id,
+                                file_sha256=sha256,
+                                content_sha256=None,
+                                size_bytes=size_bytes,
+                                status="parse_error",
+                            )
+                        except Exception as db_exc:
+                            logger.exception(
+                                "No fue posible registrar en PostgreSQL el archivo "
+                                "con error de lectura: %s",
+                                filename,
+                            )
+                            cycle_incidents.append(
+                                "ERROR BASE DE DATOS"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                f" | Motivo: {type(db_exc).__name__}: {db_exc}"
+                            )
 
                         mark_processed(
                             message_id=message_id,
@@ -381,10 +484,40 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         content_sha256[:16],
                     )
 
+                    # ========================================================
+                    # DUPLICADO LÓGICO
+                    # ========================================================
+
                     content_match = find_by_content_sha256(entity, content_sha256)
+
                     if content_match is not None:
                         duplicate_files += 1
                         staging_destination.unlink(missing_ok=True)
+
+                        try:
+                            _register_ingestion_outcome(
+                                entity=entity,
+                                filename=filename,
+                                source_path=content_match.local_path,
+                                message_id=message_id,
+                                attachment_id=attachment_id,
+                                file_sha256=sha256,
+                                content_sha256=content_sha256,
+                                size_bytes=size_bytes,
+                                status="duplicate_content",
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "No fue posible registrar el duplicado lógico "
+                                "en PostgreSQL: %s",
+                                filename,
+                            )
+                            cycle_incidents.append(
+                                "ERROR BASE DE DATOS"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                f" | Motivo: {type(exc).__name__}: {exc}"
+                            )
 
                         mark_processed(
                             message_id=message_id,
@@ -415,12 +548,134 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         )
                         continue
 
+                    # ========================================================
+                    # ARCHIVO NUEVO: UBICACIÓN DEFINITIVA
+                    # ========================================================
+
                     final_destination = _resolve_final_destination(
                         base_destination,
                         attachment_id,
                         sha256,
                     )
                     os.replace(staging_destination, final_destination)
+
+                    # ========================================================
+                    # POSTGRESQL: INGESTION + TABLA ENTIDAD/OPERACIÓN
+                    # ========================================================
+
+                    ingestion_id: int | None = None
+
+                    try:
+                        ingestion_id = register_ingestion_file(
+                            entity=entity,
+                            source_filename=filename,
+                            source_path=final_destination,
+                            message_id=message_id,
+                            attachment_id=attachment_id,
+                            file_sha256=sha256,
+                            content_sha256=content_sha256,
+                            size_bytes=size_bytes,
+                        )
+
+                        persistence = save_report_data(
+                            ingestion_id=ingestion_id,
+                            report=report,
+                            entity=entity,
+                        )
+
+                        if persistence.complete:
+                            files_saved_to_database += 1
+
+                            logger.info(
+                                "Archivo guardado en base de datos: "
+                                "%s | ingestion_id=%s | filas=%s | warnings=%s",
+                                filename,
+                                ingestion_id,
+                                persistence.rows_saved,
+                                persistence.rows_with_warnings,
+                            )
+                        else:
+                            pending_parts: list[str] = []
+
+                            if persistence.unsupported_reports:
+                                pending_parts.append(
+                                    "sin soporte="
+                                    + ", ".join(persistence.unsupported_reports)
+                                )
+
+                            if persistence.unclassified_sheets:
+                                pending_parts.append(
+                                    "sin clasificar="
+                                    + ", ".join(persistence.unclassified_sheets)
+                                )
+
+                            pending_reason = (
+                                " | ".join(pending_parts)
+                                or "persistencia parcial"
+                            )
+
+                            logger.warning(
+                                "Archivo registrado en PostgreSQL pero con "
+                                "persistencia parcial: %s | ingestion_id=%s | %s",
+                                filename,
+                                ingestion_id,
+                                pending_reason,
+                            )
+
+                            cycle_incidents.append(
+                                "PERSISTENCIA PARCIAL"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                f" | Ingestion ID: {ingestion_id}"
+                                f" | Motivo: {pending_reason}"
+                            )
+
+                    except Exception as exc:
+                        logger.exception(
+                            "Error guardando el reporte en PostgreSQL: %s",
+                            filename,
+                        )
+
+                        if ingestion_id is not None:
+                            try:
+                                set_ingestion_status(
+                                    ingestion_id=ingestion_id,
+                                    status="database_error",
+                                    content_sha256=content_sha256,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "No fue posible actualizar a database_error "
+                                    "la ingesta %s.",
+                                    ingestion_id,
+                                )
+
+                        cycle_incidents.append(
+                            "ERROR BASE DE DATOS"
+                            f" | Entidad: {entity}"
+                            f" | Archivo: {filename}"
+                            f" | Motivo: {type(exc).__name__}: {exc}"
+                        )
+
+                        # El archivo ya quedó almacenado localmente. Se registra
+                        # en SQLite como error para no volver a descargar el mismo
+                        # adjunto en cada ciclo.
+                        mark_processed(
+                            message_id=message_id,
+                            attachment_id=attachment_id,
+                            entity=entity,
+                            filename=filename,
+                            local_path=final_destination,
+                            size_bytes=size_bytes,
+                            sha256=sha256,
+                            content_sha256=content_sha256,
+                            status="database_error",
+                        )
+                        continue
+
+                    # ========================================================
+                    # CONTROL OPERATIVO SQLITE
+                    # ========================================================
 
                     mark_processed(
                         message_id=message_id,
@@ -454,8 +709,9 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
     finally:
         finished_at = datetime.now()
 
-        logger.info("Archivos transferidos desde Graph: %s", downloaded)
+        logger.info("Archivos descargados desde Graph API: %s", downloaded)
         logger.info("Archivos parseados correctamente: %s", files_parsed)
+        logger.info("Guardados en base de datos: %s", files_saved_to_database)
         logger.info("Duplicados omitidos: %s", duplicate_files)
         logger.info("Archivos enviados a OTROS: %s", unknown_entity_files)
         logger.info("Archivos rechazados por tamaño: %s", oversized_files)
@@ -469,6 +725,7 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
             messages_reviewed=messages_reviewed,
             files_downloaded=downloaded,
             files_parsed=files_parsed,
+            files_saved_to_database=files_saved_to_database,
             duplicate_files=duplicate_files,
             unknown_entity_files=unknown_entity_files,
             oversized_files=oversized_files,
