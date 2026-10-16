@@ -104,6 +104,8 @@ class DailyProcessSummary:
 
     parse_errors: int = 0
 
+    structure_changes: tuple[str, ...] = ()
+
 
 
     details: tuple[str, ...] = ()
@@ -726,6 +728,22 @@ class EmailNotifier:
 
 
 
+        if summary.structure_changes:
+
+            structure_plain = "\n".join(
+
+                f"- {change}"
+
+                for change in summary.structure_changes
+
+            )
+
+        else:
+
+            structure_plain = "Sin cambios de estructura."
+
+
+
         plain_body = (
 
             "AUTO CLOSENETTING\n"
@@ -756,13 +774,22 @@ class EmailNotifier:
 
             f"- Rechazados por tamaño: {summary.oversized_files}\n"
 
-            f"- Errores de lectura: {summary.parse_errors}\n\n"
+            f"- Errores de lectura: {summary.parse_errors}\n"
+
+            f"- Cambios de estructura detectados: "
+            f"{len(summary.structure_changes)}\n\n"
 
 
 
             f"Ejecución: {started_text} - {finished_text}\n"
 
             f"Duración: {duration_text}\n\n"
+
+
+
+            "Cambios de estructura detectados\n"
+
+            f"{structure_plain}\n\n"
 
 
 
@@ -835,6 +862,49 @@ class EmailNotifier:
             ">
 
                 Sin incidencias.
+
+            </div>
+
+            """
+
+
+
+        if summary.structure_changes:
+
+            structure_html = "".join(
+
+                f"""
+
+                <div style="
+                    padding: 6px 0;
+                    border-bottom: 1px solid #F3D7A5;
+                    font-size: 12px;
+                    line-height: 1.45;
+                "">
+
+                    {
+                        html.escape(change)
+                        .replace(" | ", "<br>")
+                    }
+
+                </div>
+
+                """
+
+                for change in summary.structure_changes
+
+            )
+
+        else:
+
+            structure_html = """
+
+            <div style="
+                font-size: 12px;
+                color: #4B5563;
+            "">
+
+                Sin cambios de estructura.
 
             </div>
 
@@ -1220,6 +1290,24 @@ class EmailNotifier:
 
 
 
+                    <tr>
+
+                      <td style="padding:4px 0;color:#4B5563;">
+
+                        Cambios de estructura detectados
+
+                      </td>
+
+                      <td align="right" style="padding:4px 0;font-weight:bold;">
+
+                        {len(summary.structure_changes)}
+
+                      </td>
+
+                    </tr>
+
+
+
                   </table>
 
 
@@ -1251,6 +1339,27 @@ class EmailNotifier:
                     {html.escape(duration_text)}
 
                   </div>
+
+
+
+                  <!-- CAMBIOS DE ESTRUCTURA -->
+
+                  <div style="
+                      margin: 14px 0 7px 0;
+                      padding-top: 12px;
+                      border-top: 1px solid #E5E7EB;
+                      font-size: 13px;
+                      font-weight: bold;
+                      color: #92400E;
+                  ">
+
+                    Cambios de estructura detectados
+
+                  </div>
+
+
+
+                  {structure_html}
 
 
 

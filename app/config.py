@@ -65,6 +65,7 @@ class OperationalConfig:
     timezone: str
     business_day_mode: str
     late_arrival_grace_hours: int
+    recovery_business_days: int
     graph_page_size: int
     max_messages_per_cycle: int
     max_files_per_cycle: int
@@ -270,8 +271,9 @@ def load_operational_config() -> OperationalConfig:
     """
     Carga y valida config.json.
 
-    La selección de correos se realizará posteriormente
-    por día hábil anterior, no por los últimos N mensajes.
+    La selección de correos mantiene como fecha objetivo
+    el día hábil anterior, pero puede ampliar automáticamente
+    la ventana hacia atrás para recuperar días no ejecutados.
 
     Los límites de mensajes y archivos se mantienen como
     controles defensivos de seguridad.
@@ -325,6 +327,18 @@ def load_operational_config() -> OperationalConfig:
     # tolerancia y ampliar demasiado la consulta.
     if late_arrival_grace_hours > 48:
         raise ConfigurationError("'late_arrival_grace_hours' " "no puede ser mayor que 48.")
+
+    recovery_business_days = _positive_int(
+        raw.get("recovery_business_days", 10),
+        "recovery_business_days",
+    )
+
+    # Límite defensivo para evitar ventanas excesivamente amplias
+    # por un error de configuración.
+    if recovery_business_days > 60:
+        raise ConfigurationError(
+            "'recovery_business_days' no puede ser mayor que 60."
+        )
 
     # ========================================================
     # MICROSOFT GRAPH
@@ -503,6 +517,8 @@ def load_operational_config() -> OperationalConfig:
         business_day_mode=(business_day_mode),
 
         late_arrival_grace_hours=(late_arrival_grace_hours),
+
+        recovery_business_days=(recovery_business_days),
 
         graph_page_size=(graph_page_size),
 

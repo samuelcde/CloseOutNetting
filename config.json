@@ -3,41 +3,34 @@
   "timezone": "America/Bogota",
   "business_day_mode": "previous_business_day",
   "late_arrival_grace_hours": 16,
-
+  "recovery_business_days": 10,
   "graph_page_size": 50,
   "max_messages_per_cycle": 500,
   "max_files_per_cycle": 100,
-
   "max_attachment_mb": 25,
-
   "alert_recipients": [
-  "APRENDIZTI@set-icap.co"
+    "APRENDIZTI@set-icap.co"
   ],
-
   "allowed_extensions": [
     ".xlsx",
     ".csv"
   ],
-
   "default_entity": "OTROS",
-
   "entities": {
     "citi.com": "CITI",
     "gs.com": "GS",
     "morganstanley.com": "MORGAN_STANLEY",
-    "sc.com":"STANDARD",
-    "set-icap.co":"SET-ICAP",
-    "baml.com":"FICC",
-    "smbc-cm.com ":"SMBC",
-    "bbva.com":"BBVA"
+    "sc.com": "STANDARD",
+    "set-icap.co": "SET-ICAP",
+    "baml.com": "FICC",
+    "smbc-cm.com ": "SMBC",
+    "bbva.com": "BBVA"
   },
-
   "parser": {
-  "max_rows_per_table": 100000,
-  "max_columns_per_table": 200,
-  "max_sheets_per_workbook": 20,
-  "max_xlsx_uncompressed_mb": 150,
-  "max_zip_ratio": 100
+    "max_rows_per_table": 100000,
+    "max_columns_per_table": 200,
+    "max_sheets_per_workbook": 20,
+    "max_xlsx_uncompressed_mb": 150,
+    "max_zip_ratio": 100
   }
 }
-

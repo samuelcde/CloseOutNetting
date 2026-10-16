@@ -85,17 +85,8 @@ class GraphClient:
         max_messages: int,
     ) -> list[dict[str, Any]]:
         """
-        Obtiene los mensajes cuya fecha de recepción pertenece
-        a la ventana del día hábil anterior.
-
-        Incluye:
-            - día completo;
-            - tolerancia para llegadas tardías;
-            - paginación mediante @odata.nextLink;
-            - límite defensivo max_messages.
-
-        max_messages NO define qué correos corresponden al día.
-        Solo funciona como fusible de seguridad.
+        Compatibilidad con el comportamiento original:
+        consulta únicamente el día hábil anterior.
         """
 
         window = build_previous_business_day_window(
@@ -103,12 +94,70 @@ class GraphClient:
             late_arrival_grace_hours=late_arrival_grace_hours,
         )
 
-        start_graph = _graph_datetime(window.start_utc)
+        return self._list_messages_for_window(
+            window=window,
+            timezone_name=timezone_name,
+            page_size=page_size,
+            max_messages=max_messages,
+            window_description="día hábil anterior",
+        )
 
+    def list_messages_for_recovery_window(
+        self,
+        *,
+        timezone_name: str,
+        late_arrival_grace_hours: int,
+        recovery_business_days: int,
+        page_size: int,
+        max_messages: int,
+    ) -> list[dict[str, Any]]:
+        """
+        Consulta una ventana continua que comienza en el más antiguo
+        de los últimos N días hábiles y termina en el cierre de la
+        ventana del día hábil anterior.
+
+        Esto permite recuperar automáticamente correos que quedaron
+        pendientes cuando el proceso no se ejecutó durante varios días.
+        """
+
+        window = build_business_day_recovery_window(
+            timezone_name=timezone_name,
+            late_arrival_grace_hours=late_arrival_grace_hours,
+            recovery_business_days=recovery_business_days,
+        )
+
+        logger.info(
+            "Recuperación automática habilitada: %s día(s) hábil(es).",
+            recovery_business_days,
+        )
+
+        return self._list_messages_for_window(
+            window=window,
+            timezone_name=timezone_name,
+            page_size=page_size,
+            max_messages=max_messages,
+            window_description=(
+                f"recuperación de {recovery_business_days} día(s) hábil(es)"
+            ),
+        )
+
+    def _list_messages_for_window(
+        self,
+        *,
+        window: MessageWindow,
+        timezone_name: str,
+        page_size: int,
+        max_messages: int,
+        window_description: str,
+    ) -> list[dict[str, Any]]:
+        """Ejecuta la consulta paginada de mensajes para una ventana dada."""
+
+        start_graph = _graph_datetime(window.start_utc)
         end_graph = _graph_datetime(window.end_utc)
 
         logger.info(
-            "Consultando correos del día hábil objetivo: %s",
+            "Consultando correos | %s | Fecha objetivo actual: %s",
+            window_description,
             window.target_date.isoformat(),
         )
 
@@ -119,33 +168,55 @@ class GraphClient:
             timezone_name,
         )
 
-        logger.info("Ventana Microsoft Graph UTC: %s -> %s", start_graph, end_graph)
+        logger.info(
+            "Ventana Microsoft Graph UTC: %s -> %s",
+            start_graph,
+            end_graph,
+        )
 
-        url = (f"{GRAPH_BASE_URL}" f"/users/{self._mailbox()}" f"/mailFolders/inbox/messages")
+        url = (
+            f"{GRAPH_BASE_URL}"
+            f"/users/{self._mailbox()}"
+            f"/mailFolders/inbox/messages"
+        )
 
         params: dict[str, Any] | None = {
             "$top": page_size,
-            "$select": ("id," "subject," "receivedDateTime," "from," "hasAttachments"),
+            "$select": (
+                "id,"
+                "subject,"
+                "receivedDateTime,"
+                "from,"
+                "hasAttachments"
+            ),
+            # Se consultan únicamente mensajes que Graph identifica
+            # con adjuntos. El control detallado del tipo de adjunto
+            # se mantiene posteriormente en processor.py.
             "$filter": (
-                f"receivedDateTime ge {start_graph} " f"and receivedDateTime lt {end_graph}"
+                f"receivedDateTime ge {start_graph} "
+                f"and receivedDateTime lt {end_graph} "
+                "and hasAttachments eq true"
             ),
         }
 
         messages: list[dict[str, Any]] = []
-
         seen_next_links: set[str] = set()
-
         page_number = 0
 
         while url:
             page_number += 1
 
             try:
-                response = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT,
+                )
 
             except requests.RequestException as exc:
                 raise GraphApiError(
-                    "Error consultando mensajes " f"en Microsoft Graph: {exc}"
+                    "Error consultando mensajes "
+                    f"en Microsoft Graph: {exc}"
                 ) from exc
 
             self._raise_for_graph_error(response)
@@ -155,15 +226,23 @@ class GraphClient:
 
             except ValueError as exc:
                 raise GraphApiError(
-                    "Microsoft Graph devolvió " "una respuesta JSON inválida."
+                    "Microsoft Graph devolvió "
+                    "una respuesta JSON inválida."
                 ) from exc
 
             page_messages = payload.get("value")
 
             if not isinstance(page_messages, list):
-                raise GraphApiError("Microsoft Graph no devolvió " "la colección esperada 'value'.")
+                raise GraphApiError(
+                    "Microsoft Graph no devolvió "
+                    "la colección esperada 'value'."
+                )
 
-            logger.info("Página Graph %s: %s mensaje(s).", page_number, len(page_messages))
+            logger.info(
+                "Página Graph %s: %s mensaje(s).",
+                page_number,
+                len(page_messages),
+            )
 
             # ====================================================
             # TOPE DEFENSIVO
@@ -174,7 +253,9 @@ class GraphClient:
             if remaining_capacity <= 0:
                 break
 
-            messages.extend(page_messages[:remaining_capacity])
+            messages.extend(
+                page_messages[:remaining_capacity]
+            )
 
             if len(messages) >= max_messages:
                 next_link = payload.get("@odata.nextLink")
@@ -199,11 +280,16 @@ class GraphClient:
                 break
 
             if not isinstance(next_link, str):
-                raise GraphApiError("Microsoft Graph devolvió un " "@odata.nextLink inválido.")
+                raise GraphApiError(
+                    "Microsoft Graph devolvió un "
+                    "@odata.nextLink inválido."
+                )
 
-            # Protección frente a un nextLink repetido.
             if next_link in seen_next_links:
-                raise GraphApiError("Microsoft Graph devolvió un " "@odata.nextLink repetido.")
+                raise GraphApiError(
+                    "Microsoft Graph devolvió un "
+                    "@odata.nextLink repetido."
+                )
 
             seen_next_links.add(next_link)
 
@@ -212,8 +298,8 @@ class GraphClient:
             params = None
 
         logger.info(
-            "Total de mensajes encontrados para " "%s: %s",
-            window.target_date.isoformat(),
+            "Total de mensajes encontrados en la ventana "
+            "de recuperación: %s",
             len(messages),
         )
 
@@ -428,6 +514,88 @@ def build_previous_business_day_window(
         start_utc=start_utc,
         end_utc=end_utc,
     )
+
+
+def build_business_day_recovery_window(
+    *,
+    timezone_name: str,
+    late_arrival_grace_hours: int,
+    recovery_business_days: int,
+    now: datetime | None = None,
+) -> MessageWindow:
+    """
+    Construye una ventana continua de recuperación.
+
+    La fecha objetivo sigue siendo el día hábil anterior, pero el
+    inicio retrocede hasta cubrir N días hábiles, incluyendo en la
+    consulta los días calendario intermedios.
+
+    Ejemplo con recovery_business_days = 10:
+        inicio -> 00:00 del décimo día hábil anterior
+        fin    -> fin de la ventana del día hábil anterior
+                  + tolerancia configurada
+
+    Por ahora se consideran hábiles de lunes a viernes. Los festivos
+    no se descuentan del contador, igual que en la lógica original.
+    """
+
+    if recovery_business_days <= 0:
+        raise ValueError(
+            "'recovery_business_days' debe ser mayor que cero."
+        )
+
+    local_timezone = ZoneInfo(timezone_name)
+
+    if now is None:
+        now_local = datetime.now(local_timezone)
+
+    else:
+        if now.tzinfo is None:
+            raise ValueError(
+                "'now' debe contener información de zona horaria."
+            )
+
+        now_local = now.astimezone(local_timezone)
+
+    target_date = _get_previous_business_date(
+        now_local.date()
+    )
+
+    recovery_start_date = target_date
+
+    for _ in range(recovery_business_days - 1):
+        recovery_start_date = _get_previous_business_date(
+            recovery_start_date
+        )
+
+    start_local = datetime.combine(
+        recovery_start_date,
+        time.min,
+        tzinfo=local_timezone,
+    )
+
+    next_calendar_day = target_date + timedelta(days=1)
+
+    nominal_end_local = datetime.combine(
+        next_calendar_day,
+        time.min,
+        tzinfo=local_timezone,
+    ) + timedelta(hours=late_arrival_grace_hours)
+
+    # Nunca consultar fechas futuras.
+    end_local = min(
+        nominal_end_local,
+        now_local,
+    )
+
+    return MessageWindow(
+        target_date=target_date,
+        start_local=start_local,
+        end_local=end_local,
+        start_utc=start_local.astimezone(timezone.utc),
+        end_utc=end_local.astimezone(timezone.utc),
+    )
+
 
 def _graph_datetime(value: datetime) -> str:
     """

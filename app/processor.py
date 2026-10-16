@@ -23,7 +23,10 @@ from .exceptions import (
     SecurityValidationError,
 )
 from .fingerprint import build_report_content_sha256
-from .graph_api import GraphClient, build_previous_business_day_window
+from .graph_api import (
+    GraphClient,
+    build_business_day_recovery_window,
+)
 from .notifier import DailyProcessSummary, EmailNotifier, NotificationError
 from .parser import parse_report
 from .postgres_db import register_ingestion_file, set_ingestion_status
@@ -31,6 +34,36 @@ from .security import avoid_file_collision, build_safe_destination, sanitize_fil
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_graph_received_at(
+    value: object,
+) -> datetime | None:
+    """
+    Convierte Microsoft Graph receivedDateTime a datetime aware.
+
+    Ejemplo Graph:
+        2026-10-16T13:45:22Z
+    """
+
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    try:
+        return datetime.fromisoformat(
+            text.replace("Z", "+00:00")
+        )
+    except ValueError:
+        logger.warning(
+            "receivedDateTime inválido recibido desde Graph: %r",
+            text,
+        )
+        return None
 
 
 def _safe_notify(description: str, action: Callable[[], None]) -> None:
@@ -91,6 +124,7 @@ def _register_ingestion_outcome(
     file_sha256: str,
     content_sha256: str | None,
     size_bytes: int,
+    received_at: datetime | None,
     status: str,
 ) -> int:
     """Registra el archivo en ingestion_files y deja su estado final."""
@@ -104,6 +138,7 @@ def _register_ingestion_outcome(
         file_sha256=file_sha256,
         content_sha256=content_sha256,
         size_bytes=size_bytes,
+        received_at=received_at,
     )
 
     set_ingestion_status(
@@ -135,6 +170,7 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
     oversized_files = 0
     parse_errors = 0
 
+    structure_changes: list[str] = []
     cycle_incidents: list[str] = []
     cycle_error: Exception | None = None
 
@@ -148,20 +184,34 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
     logger.info("============================================================")
 
     try:
-        processing_window = build_previous_business_day_window(
+        processing_window = build_business_day_recovery_window(
             timezone_name=config.timezone,
             late_arrival_grace_hours=config.late_arrival_grace_hours,
+            recovery_business_days=config.recovery_business_days,
         )
 
         target_date = processing_window.target_date
-        logger.info("Fecha objetivo del ciclo: %s", target_date.isoformat())
+
+        logger.info(
+            "Fecha objetivo actual del ciclo: %s",
+            target_date.isoformat(),
+        )
+
+        logger.info(
+            "Ventana automática de recuperación: %s día(s) hábil(es) "
+            "| Inicio: %s | Fin: %s",
+            config.recovery_business_days,
+            processing_window.start_local.isoformat(),
+            processing_window.end_local.isoformat(),
+        )
 
         access_token = get_access_token(settings)
 
         with GraphClient(access_token, settings.mailbox_user) as graph:
-            messages = graph.list_messages_for_previous_business_day(
+            messages = graph.list_messages_for_recovery_window(
                 timezone_name=config.timezone,
                 late_arrival_grace_hours=config.late_arrival_grace_hours,
+                recovery_business_days=config.recovery_business_days,
                 page_size=config.graph_page_size,
                 max_messages=config.max_messages_per_cycle,
             )
@@ -184,6 +234,10 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                 if not message_id:
                     logger.warning("Mensaje sin ID. Se omite.")
                     continue
+
+                message_received_at = _parse_graph_received_at(
+                    message.get("receivedDateTime")
+                )
 
                 sender_address = get_sender_address(message)
                 entity = resolve_entity(message, config)
@@ -355,6 +409,7 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                                 file_sha256=sha256,
                                 content_sha256=binary_match.content_sha256,
                                 size_bytes=size_bytes,
+                                received_at=message_received_at,
                                 status="duplicate_binary",
                             )
                         except Exception as exc:
@@ -429,6 +484,7 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                                 file_sha256=sha256,
                                 content_sha256=None,
                                 size_bytes=size_bytes,
+                                received_at=message_received_at,
                                 status="parse_error",
                             )
                         except Exception as db_exc:
@@ -504,6 +560,7 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                                 file_sha256=sha256,
                                 content_sha256=content_sha256,
                                 size_bytes=size_bytes,
+                                received_at=message_received_at,
                                 status="duplicate_content",
                             )
                         except Exception as exc:
@@ -575,6 +632,7 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             file_sha256=sha256,
                             content_sha256=content_sha256,
                             size_bytes=size_bytes,
+                            received_at=message_received_at,
                         )
 
                         persistence = save_report_data(
@@ -582,6 +640,35 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             report=report,
                             entity=entity,
                         )
+
+                        for change in persistence.structure_changes:
+                            if change.code == "UNEXPECTED_COLUMN":
+                                description = (
+                                    "CAMPO NUEVO"
+                                    f" | Entidad: {change.entity}"
+                                    f" | Mercado: {change.report_type}"
+                                    f" | Hoja: {change.sheet_name}"
+                                    f" | Campo: {change.column}"
+                                    f" | Archivo: {filename}"
+                                )
+                            else:
+                                description = (
+                                    "CAMPO ESPERADO AUSENTE"
+                                    f" | Entidad: {change.entity}"
+                                    f" | Mercado: {change.report_type}"
+                                    f" | Hoja: {change.sheet_name}"
+                                    f" | Campo: {change.column}"
+                                    f" | Archivo: {filename}"
+                                )
+
+                            structure_changes.append(
+                                description
+                            )
+
+                            logger.warning(
+                                "Cambio de estructura detectado: %s",
+                                description,
+                            )
 
                         if persistence.complete:
                             files_saved_to_database += 1
@@ -730,6 +817,9 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
             unknown_entity_files=unknown_entity_files,
             oversized_files=oversized_files,
             parse_errors=parse_errors,
+            structure_changes=tuple(
+                dict.fromkeys(structure_changes)
+            ),
             details=tuple(cycle_incidents),
         )
 
