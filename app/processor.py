@@ -29,7 +29,11 @@ from .graph_api import (
 )
 from .notifier import DailyProcessSummary, EmailNotifier, NotificationError
 from .parser import parse_report
-from .postgres_db import register_ingestion_file, set_ingestion_status
+from .postgres_db import (
+    find_persisted_ingestion_by_hash,
+    register_ingestion_attempt,
+    set_ingestion_status,
+)
 from .security import avoid_file_collision, build_safe_destination, sanitize_filename
 
 
@@ -64,6 +68,20 @@ def _parse_graph_received_at(
             text,
         )
         return None
+
+
+def _source_year(
+    received_at: datetime | None,
+) -> int | None:
+    """
+    Obtiene el año de origen a partir de la fecha real de recepción
+    del correo. Si Graph no entrega una fecha válida, devuelve None.
+    """
+
+    if received_at is None:
+        return None
+
+    return received_at.year
 
 
 def _safe_notify(description: str, action: Callable[[], None]) -> None:
@@ -112,42 +130,6 @@ def _resolve_final_destination(
         f"{base_destination.stem}__{sha256[:12]}_{uuid.uuid4().hex[:8]}"
         f"{base_destination.suffix}"
     )
-
-
-def _register_ingestion_outcome(
-    *,
-    entity: str,
-    filename: str,
-    source_path: str | Path | None,
-    message_id: str,
-    attachment_id: str,
-    file_sha256: str,
-    content_sha256: str | None,
-    size_bytes: int,
-    received_at: datetime | None,
-    status: str,
-) -> int:
-    """Registra el archivo en ingestion_files y deja su estado final."""
-
-    ingestion_id = register_ingestion_file(
-        entity=entity,
-        source_filename=filename,
-        source_path=source_path,
-        message_id=message_id,
-        attachment_id=attachment_id,
-        file_sha256=file_sha256,
-        content_sha256=content_sha256,
-        size_bytes=size_bytes,
-        received_at=received_at,
-    )
-
-    set_ingestion_status(
-        ingestion_id=ingestion_id,
-        status=status,
-        content_sha256=content_sha256,
-    )
-
-    return ingestion_id
 
 
 def process_cycle(settings: Settings, config: OperationalConfig) -> int:
@@ -374,6 +356,28 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         size_bytes,
                     )
 
+                    # ingestion_files funciona como bitácora de intentos.
+                    # Se registra después de completar la descarga del archivo.
+                    # processed_at permanece NULL hasta finalizar totalmente
+                    # la persistencia en PostgreSQL.
+                    ingestion_id = register_ingestion_attempt(
+                        entity=entity,
+                        source_filename=filename,
+                        source_year=_source_year(message_received_at),
+                        file_sha256=sha256,
+                        content_sha256=None,
+                        size_bytes=size_bytes,
+                        received_at=message_received_at,
+                        status="downloaded",
+                    )
+
+                    logger.info(
+                        "Intento de ingesta registrado: "
+                        "%s | ingestion_id=%s | processed_at=NULL",
+                        filename,
+                        ingestion_id,
+                    )
+
                     if is_unknown_entity:
                         unknown_entity_files += 1
                         logger.warning(
@@ -399,31 +403,11 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         duplicate_files += 1
                         staging_destination.unlink(missing_ok=True)
 
-                        try:
-                            _register_ingestion_outcome(
-                                entity=entity,
-                                filename=filename,
-                                source_path=binary_match.local_path,
-                                message_id=message_id,
-                                attachment_id=attachment_id,
-                                file_sha256=sha256,
-                                content_sha256=binary_match.content_sha256,
-                                size_bytes=size_bytes,
-                                received_at=message_received_at,
-                                status="duplicate_binary",
-                            )
-                        except Exception as exc:
-                            logger.exception(
-                                "No fue posible registrar el duplicado binario "
-                                "en PostgreSQL: %s",
-                                filename,
-                            )
-                            cycle_incidents.append(
-                                "ERROR BASE DE DATOS"
-                                f" | Entidad: {entity}"
-                                f" | Archivo: {filename}"
-                                f" | Motivo: {type(exc).__name__}: {exc}"
-                            )
+                        set_ingestion_status(
+                            ingestion_id=ingestion_id,
+                            status="duplicate_binary",
+                            content_sha256=binary_match.content_sha256,
+                        )
 
                         mark_processed(
                             message_id=message_id,
@@ -454,6 +438,51 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         continue
 
                     # ========================================================
+                    # DUPLICADO BINARIO YA PERSISTIDO EN POSTGRESQL
+                    # ========================================================
+
+                    persisted_binary = find_persisted_ingestion_by_hash(
+                        entity=entity,
+                        file_sha256=sha256,
+                    )
+
+                    if persisted_binary is not None:
+                        duplicate_files += 1
+                        staging_destination.unlink(missing_ok=True)
+
+                        set_ingestion_status(
+                            ingestion_id=ingestion_id,
+                            status="duplicate_binary_database",
+                        )
+
+                        mark_processed(
+                            message_id=message_id,
+                            attachment_id=attachment_id,
+                            entity=entity,
+                            filename=filename,
+                            local_path=None,
+                            size_bytes=size_bytes,
+                            sha256=sha256,
+                            content_sha256=None,
+                            status="duplicate_binary_database",
+                        )
+
+                        logger.info(
+                            "Duplicado binario ya persistido en PostgreSQL: "
+                            "%s | Entidad: %s | ingestion_id=%s",
+                            filename,
+                            entity,
+                            persisted_binary[0],
+                        )
+                        cycle_incidents.append(
+                            "DUPLICADO OMITIDO"
+                            f" | Entidad: {entity}"
+                            f" | Archivo: {filename}"
+                            " | Motivo: SHA-256 físico ya existe en PostgreSQL"
+                        )
+                        continue
+
+                    # ========================================================
                     # PARSEO
                     # ========================================================
 
@@ -467,38 +496,17 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                     except ReportParseError as exc:
                         parse_errors += 1
 
+                        set_ingestion_status(
+                            ingestion_id=ingestion_id,
+                            status="parse_error",
+                        )
+
                         final_destination = _resolve_final_destination(
                             base_destination,
                             attachment_id,
                             sha256,
                         )
                         os.replace(staging_destination, final_destination)
-
-                        try:
-                            _register_ingestion_outcome(
-                                entity=entity,
-                                filename=filename,
-                                source_path=final_destination,
-                                message_id=message_id,
-                                attachment_id=attachment_id,
-                                file_sha256=sha256,
-                                content_sha256=None,
-                                size_bytes=size_bytes,
-                                received_at=message_received_at,
-                                status="parse_error",
-                            )
-                        except Exception as db_exc:
-                            logger.exception(
-                                "No fue posible registrar en PostgreSQL el archivo "
-                                "con error de lectura: %s",
-                                filename,
-                            )
-                            cycle_incidents.append(
-                                "ERROR BASE DE DATOS"
-                                f" | Entidad: {entity}"
-                                f" | Archivo: {filename}"
-                                f" | Motivo: {type(db_exc).__name__}: {db_exc}"
-                            )
 
                         mark_processed(
                             message_id=message_id,
@@ -529,6 +537,12 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                     files_parsed += 1
                     content_sha256 = build_report_content_sha256(report)
 
+                    set_ingestion_status(
+                        ingestion_id=ingestion_id,
+                        status="parsed",
+                        content_sha256=content_sha256,
+                    )
+
                     logger.info(
                         "Reporte interpretado correctamente: "
                         "%s | Entidad: %s | Tablas: %s | Registros: %s "
@@ -550,31 +564,11 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         duplicate_files += 1
                         staging_destination.unlink(missing_ok=True)
 
-                        try:
-                            _register_ingestion_outcome(
-                                entity=entity,
-                                filename=filename,
-                                source_path=content_match.local_path,
-                                message_id=message_id,
-                                attachment_id=attachment_id,
-                                file_sha256=sha256,
-                                content_sha256=content_sha256,
-                                size_bytes=size_bytes,
-                                received_at=message_received_at,
-                                status="duplicate_content",
-                            )
-                        except Exception as exc:
-                            logger.exception(
-                                "No fue posible registrar el duplicado lógico "
-                                "en PostgreSQL: %s",
-                                filename,
-                            )
-                            cycle_incidents.append(
-                                "ERROR BASE DE DATOS"
-                                f" | Entidad: {entity}"
-                                f" | Archivo: {filename}"
-                                f" | Motivo: {type(exc).__name__}: {exc}"
-                            )
+                        set_ingestion_status(
+                            ingestion_id=ingestion_id,
+                            status="duplicate_content",
+                            content_sha256=content_sha256,
+                        )
 
                         mark_processed(
                             message_id=message_id,
@@ -606,6 +600,52 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         continue
 
                     # ========================================================
+                    # DUPLICADO LÓGICO YA PERSISTIDO EN POSTGRESQL
+                    # ========================================================
+
+                    persisted_content = find_persisted_ingestion_by_hash(
+                        entity=entity,
+                        content_sha256=content_sha256,
+                    )
+
+                    if persisted_content is not None:
+                        duplicate_files += 1
+                        staging_destination.unlink(missing_ok=True)
+
+                        set_ingestion_status(
+                            ingestion_id=ingestion_id,
+                            status="duplicate_content_database",
+                            content_sha256=content_sha256,
+                        )
+
+                        mark_processed(
+                            message_id=message_id,
+                            attachment_id=attachment_id,
+                            entity=entity,
+                            filename=filename,
+                            local_path=None,
+                            size_bytes=size_bytes,
+                            sha256=sha256,
+                            content_sha256=content_sha256,
+                            status="duplicate_content_database",
+                        )
+
+                        logger.info(
+                            "Duplicado lógico ya persistido en PostgreSQL: "
+                            "%s | Entidad: %s | ingestion_id=%s",
+                            filename,
+                            entity,
+                            persisted_content[0],
+                        )
+                        cycle_incidents.append(
+                            "DUPLICADO OMITIDO"
+                            f" | Entidad: {entity}"
+                            f" | Archivo: {filename}"
+                            " | Motivo: contenido financiero ya existe en PostgreSQL"
+                        )
+                        continue
+
+                    # ========================================================
                     # ARCHIVO NUEVO: UBICACIÓN DEFINITIVA
                     # ========================================================
 
@@ -620,25 +660,12 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                     # POSTGRESQL: INGESTION + TABLA ENTIDAD/OPERACIÓN
                     # ========================================================
 
-                    ingestion_id: int | None = None
-
                     try:
-                        ingestion_id = register_ingestion_file(
-                            entity=entity,
-                            source_filename=filename,
-                            source_path=final_destination,
-                            message_id=message_id,
-                            attachment_id=attachment_id,
-                            file_sha256=sha256,
-                            content_sha256=content_sha256,
-                            size_bytes=size_bytes,
-                            received_at=message_received_at,
-                        )
-
                         persistence = save_report_data(
                             ingestion_id=ingestion_id,
                             report=report,
                             entity=entity,
+                            content_sha256=content_sha256,
                         )
 
                         for change in persistence.structure_changes:
@@ -670,18 +697,48 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                                 description,
                             )
 
-                        if persistence.complete:
-                            files_saved_to_database += 1
-
-                            logger.info(
-                                "Archivo guardado en base de datos: "
-                                "%s | ingestion_id=%s | filas=%s | warnings=%s",
-                                filename,
+                        if persistence.rows_saved <= 0:
+                            logger.warning(
+                                "El reporte no produjo filas persistibles. "
+                                "ingestion_id=%s se conserva con processed_at=NULL: "
+                                "%s | Entidad: %s",
                                 ingestion_id,
-                                persistence.rows_saved,
-                                persistence.rows_with_warnings,
+                                filename,
+                                entity,
                             )
-                        else:
+
+                            cycle_incidents.append(
+                                "SIN DATOS EN BASE DE DATOS"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                " | Motivo: ninguna fila soportada fue persistida"
+                            )
+
+                            mark_processed(
+                                message_id=message_id,
+                                attachment_id=attachment_id,
+                                entity=entity,
+                                filename=filename,
+                                local_path=final_destination,
+                                size_bytes=size_bytes,
+                                sha256=sha256,
+                                content_sha256=content_sha256,
+                                status="no_database_rows",
+                            )
+                            continue
+
+                        files_saved_to_database += 1
+
+                        logger.info(
+                            "Archivo guardado en base de datos: "
+                            "%s | ingestion_id=%s | filas=%s | warnings=%s",
+                            filename,
+                            ingestion_id,
+                            persistence.rows_saved,
+                            persistence.rows_with_warnings,
+                        )
+
+                        if not persistence.complete:
                             pending_parts: list[str] = []
 
                             if persistence.unsupported_reports:
@@ -702,8 +759,8 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             )
 
                             logger.warning(
-                                "Archivo registrado en PostgreSQL pero con "
-                                "persistencia parcial: %s | ingestion_id=%s | %s",
+                                "Archivo guardado parcialmente en PostgreSQL: "
+                                "%s | ingestion_id=%s | %s",
                                 filename,
                                 ingestion_id,
                                 pending_reason,
@@ -723,19 +780,18 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             filename,
                         )
 
-                        if ingestion_id is not None:
-                            try:
-                                set_ingestion_status(
-                                    ingestion_id=ingestion_id,
-                                    status="database_error",
-                                    content_sha256=content_sha256,
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "No fue posible actualizar a database_error "
-                                    "la ingesta %s.",
-                                    ingestion_id,
-                                )
+                        try:
+                            set_ingestion_status(
+                                ingestion_id=ingestion_id,
+                                status="database_error",
+                                content_sha256=content_sha256,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "No fue posible actualizar ingestion_id=%s "
+                                "después del error de base de datos.",
+                                ingestion_id,
+                            )
 
                         cycle_incidents.append(
                             "ERROR BASE DE DATOS"

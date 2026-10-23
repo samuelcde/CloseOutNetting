@@ -10,6 +10,7 @@ from psycopg.types.json import Jsonb
 
 from .parser import ParsedReport, ParsedTable
 from .postgres_db import (
+    finalize_ingestion,
     get_connection,
     json_safe,
     update_ingestion_status,
@@ -39,6 +40,7 @@ class ReportPersistenceResult:
     complete: bool
     rows_saved: int
     rows_with_warnings: int
+    ingestion_id: int | None = None
     unsupported_reports: tuple[str, ...] = ()
     unclassified_sheets: tuple[str, ...] = ()
     structure_changes: tuple[StructureChange, ...] = ()
@@ -1095,7 +1097,7 @@ MARKET_RULES: dict[
 
 
 # ============================================================
-# FIELD_NOTES
+# CONSTRUCCIÓN DE VALORES
 # ============================================================
 
 
@@ -1104,9 +1106,8 @@ def _find_source_value(
     aliases: tuple[str, ...],
 ) -> tuple[bool, Any]:
     """
-    Devuelve:
-      (True, valor) si alguno de los encabezados existe,
-      aunque el valor venga vacío.
+    Devuelve (True, valor) cuando alguno de los encabezados existe,
+    incluso si el valor viene vacío.
     """
 
     for alias in aliases:
@@ -1116,34 +1117,32 @@ def _find_source_value(
     return False, None
 
 
-def _build_values_and_notes(
+def _build_values(
     *,
     entity: str,
     report_type: str,
-    sheet_name: str,
     fields: dict[str, Any],
     issues: list[dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, str]]:
+) -> dict[str, Any]:
+    """
+    Genera todas las columnas físicas de la entidad.
+
+    Si un campo no aplica al mercado, no viene en el formato o viene vacío,
+    se almacena NULL. El mensaje/fila original permanece íntegro en
+    original_message y las anomalías técnicas se conservan en
+    validation_issues.
+    """
+
     entity_columns = ENTITY_COLUMNS[entity]
     rules = MARKET_RULES[(entity, report_type)]
 
     values: dict[str, Any] = {}
-    notes: dict[str, str] = {}
-
-    normalized_sheet = (
-        normalize_name(sheet_name)
-        .upper()
-        or "DESCONOCIDO"
-    )
 
     for column in entity_columns:
         rule = rules.get(column)
 
         if rule is None:
             values[column] = None
-            notes[column] = (
-                f"NO_APLICA_PARA_{report_type}"
-            )
             continue
 
         exists, raw_value = _find_source_value(
@@ -1151,19 +1150,8 @@ def _build_values_and_notes(
             rule.aliases,
         )
 
-        if not exists:
+        if not exists or _is_blank(raw_value):
             values[column] = None
-
-            # El campo pertenece al mercado, pero no apareció en
-            # esta variante/formato del reporte.
-            notes[column] = (
-                f"NO_PRESENTE_EN_FORMATO_{normalized_sheet}"
-            )
-            continue
-
-        if _is_blank(raw_value):
-            values[column] = None
-            notes[column] = "SIN_VALOR_EN_ARCHIVO"
             continue
 
         values[column] = _convert(
@@ -1173,7 +1161,67 @@ def _build_values_and_notes(
             issues=issues,
         )
 
-    return values, notes
+    return values
+
+
+# ============================================================
+# VALIDACIÓN DE INGESTION
+# ============================================================
+
+
+def _validate_ingestion(
+    connection: Connection,
+    *,
+    ingestion_id: int,
+    entity: str,
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT entity, processed_at
+            FROM closenetting.ingestion_files
+            WHERE id = %s
+            """,
+            (ingestion_id,),
+        )
+
+        row = cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(
+            f"No existe ingestion_id={ingestion_id}."
+        )
+
+    stored_entity = str(row[0]).strip().upper()
+
+    if stored_entity != entity:
+        raise RuntimeError(
+            f"El ingestion_id={ingestion_id} pertenece a "
+            f"'{stored_entity}', no a '{entity}'."
+        )
+
+    if row[1] is not None:
+        raise RuntimeError(
+            f"El ingestion_id={ingestion_id} ya fue finalizado."
+        )
+
+
+def _clear_existing_rows(
+    connection: Connection,
+    *,
+    ingestion_id: int,
+    entity: str,
+) -> None:
+    table_name = ENTITY_TABLES[entity]
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            DELETE FROM {table_name}
+            WHERE ingestion_id = %s
+            """,
+            (ingestion_id,),
+        )
 
 
 # ============================================================
@@ -1200,9 +1248,7 @@ def _save_table(
         "ingestion_id",
         "market_type",
         "source_sheet_name",
-        "source_row_number",
         *entity_columns,
-        "field_notes",
         "original_message",
         "validation_issues",
     )
@@ -1212,19 +1258,6 @@ def _save_table(
         ["%s"] * len(insert_columns)
     )
 
-    update_columns = (
-        "market_type",
-        *entity_columns,
-        "field_notes",
-        "original_message",
-        "validation_issues",
-    )
-
-    update_sql = ", ".join(
-        f"{column} = EXCLUDED.{column}"
-        for column in update_columns
-    )
-
     query = f"""
         INSERT INTO {table_name} (
             {column_sql}
@@ -1232,14 +1265,6 @@ def _save_table(
         VALUES (
             {placeholder_sql}
         )
-        ON CONFLICT (
-            ingestion_id,
-            source_sheet_name,
-            source_row_number
-        )
-        DO UPDATE SET
-            {update_sql},
-            updated_at = CURRENT_TIMESTAMP
     """
 
     for raw_record in table.raw_records():
@@ -1253,26 +1278,21 @@ def _save_table(
             )
         )
 
-        values, field_notes = (
-            _build_values_and_notes(
-                entity=entity,
-                report_type=report_type,
-                sheet_name=table.name,
-                fields=fields,
-                issues=issues,
-            )
+        values = _build_values(
+            entity=entity,
+            report_type=report_type,
+            fields=fields,
+            issues=issues,
         )
 
         params = (
             ingestion_id,
             report_type,
             table.name,
-            int(raw_record["source_row_number"]),
             *(
                 values[column]
                 for column in entity_columns
             ),
-            Jsonb(json_safe(field_notes)),
             Jsonb(json_safe(source_cells)),
             Jsonb(json_safe(issues)),
         )
@@ -1301,12 +1321,14 @@ def save_report_data(
     ingestion_id: int,
     report: ParsedReport,
     entity: str,
+    content_sha256: str | None,
 ) -> ReportPersistenceResult:
     """
-    Persiste un archivo utilizando UNA tabla física por entidad.
+    Persiste las operaciones de un ingestion_id ya registrado.
 
-    El classifier sigue determinando el mercado/producto.
-    Esa clasificación se guarda en market_type.
+    processed_at:
+    - se fija solo si TODO el archivo termina correctamente;
+    - permanece NULL para partial, no_database_rows y errores.
     """
 
     entity_key = str(entity).strip().upper()
@@ -1317,6 +1339,93 @@ def save_report_data(
     unclassified_sheets: list[str] = []
     structure_changes: list[StructureChange] = []
 
+    plans: list[
+        tuple[
+            str,
+            ParsedTable,
+            str,
+            tuple[dict[str, Any], ...],
+        ]
+    ] = []
+
+    for sheet_name, table in report.tables.items():
+        classification = classify_table(
+            entity=entity_key,
+            table=table,
+        )
+
+        if (
+            not classification.recognized
+            or not classification.report_type
+        ):
+            unclassified_sheets.append(
+                sheet_name
+            )
+            continue
+
+        report_type = (
+            classification.report_type
+            .strip()
+            .upper()
+        )
+
+        structure_changes.extend(
+            _structure_changes(
+                entity=entity_key,
+                report_type=report_type,
+                sheet_name=sheet_name,
+                issues=classification.issues,
+            )
+        )
+
+        route = (
+            entity_key,
+            report_type,
+        )
+
+        if (
+            entity_key not in ENTITY_TABLES
+            or route not in MARKET_RULES
+        ):
+            unsupported_reports.append(
+                f"{entity_key}/{report_type}"
+            )
+            continue
+
+        plans.append(
+            (
+                sheet_name,
+                table,
+                report_type,
+                classification.issues,
+            )
+        )
+
+    unsupported_reports = list(dict.fromkeys(unsupported_reports))
+    unclassified_sheets = list(dict.fromkeys(unclassified_sheets))
+
+    unique_changes: dict[
+        tuple[str, str, str, str, str],
+        StructureChange,
+    ] = {}
+
+    for change in structure_changes:
+        key = (
+            change.entity,
+            change.report_type,
+            change.sheet_name,
+            change.code,
+            change.column,
+        )
+        unique_changes[key] = change
+
+    structure_changes = list(unique_changes.values())
+
+    complete = (
+        not unsupported_reports
+        and not unclassified_sheets
+    )
+
     with get_connection() as connection:
         _validate_ingestion(
             connection,
@@ -1324,126 +1433,86 @@ def save_report_data(
             entity=entity_key,
         )
 
-        for sheet_name, table in report.tables.items():
-            classification = classify_table(
-                entity=entity_key,
-                table=table,
+        _clear_existing_rows(
+            connection,
+            ingestion_id=ingestion_id,
+            entity=entity_key,
+        )
+
+        if not plans:
+            update_ingestion_status(
+                connection,
+                ingestion_id=ingestion_id,
+                status="no_database_rows",
+                content_sha256=content_sha256,
             )
 
-            if (
-                not classification.recognized
-                or not classification.report_type
-            ):
-                unclassified_sheets.append(
-                    sheet_name
-                )
-                continue
-
-            report_type = (
-                classification.report_type
-                .strip()
-                .upper()
+            return ReportPersistenceResult(
+                complete=complete,
+                rows_saved=0,
+                rows_with_warnings=0,
+                ingestion_id=ingestion_id,
+                unsupported_reports=tuple(unsupported_reports),
+                unclassified_sheets=tuple(unclassified_sheets),
+                structure_changes=tuple(structure_changes),
             )
 
-            route = (
-                entity_key,
-                report_type,
-            )
-
-            structure_changes.extend(
-                _structure_changes(
-                    entity=entity_key,
-                    report_type=report_type,
-                    sheet_name=sheet_name,
-                    issues=classification.issues,
-                )
-            )
-
-            if (
-                entity_key not in ENTITY_TABLES
-                or route not in MARKET_RULES
-            ):
-                unsupported_reports.append(
-                    f"{entity_key}/{report_type}"
-                )
-                continue
-
+        for (
+            _sheet_name,
+            table,
+            report_type,
+            classification_issues,
+        ) in plans:
             saved, warnings = _save_table(
                 connection,
                 ingestion_id=ingestion_id,
                 entity=entity_key,
                 report_type=report_type,
                 table=table,
-                classification_issues=(
-                    classification.issues
-                ),
+                classification_issues=classification_issues,
             )
 
             rows_saved += saved
             rows_with_warnings += warnings
 
-        unsupported_reports = list(
-            dict.fromkeys(
-                unsupported_reports
-            )
-        )
-
-        unclassified_sheets = list(
-            dict.fromkeys(
-                unclassified_sheets
-            )
-        )
-
-        # El mismo cambio de estructura no se repite por cada fila.
-        unique_changes: dict[
-            tuple[str, str, str, str, str],
-            StructureChange,
-        ] = {}
-
-        for change in structure_changes:
-            key = (
-                change.entity,
-                change.report_type,
-                change.sheet_name,
-                change.code,
-                change.column,
+        if rows_saved <= 0:
+            update_ingestion_status(
+                connection,
+                ingestion_id=ingestion_id,
+                status="no_database_rows",
+                content_sha256=content_sha256,
             )
 
-            unique_changes[key] = change
+        elif not complete:
+            # Puede haber filas parciales, pero el archivo no terminó.
+            update_ingestion_status(
+                connection,
+                ingestion_id=ingestion_id,
+                status="partial",
+                content_sha256=content_sha256,
+            )
 
-        structure_changes = list(
-            unique_changes.values()
-        )
-
-        complete = (
-            not unsupported_reports
-            and not unclassified_sheets
-        )
-
-        if not complete:
-            ingestion_status = "partial"
-        elif rows_with_warnings:
-            ingestion_status = "stored_warning"
         else:
-            ingestion_status = "stored"
+            ingestion_status = (
+                "stored_warning"
+                if rows_with_warnings
+                else "stored"
+            )
 
-        update_ingestion_status(
-            connection,
-            ingestion_id=ingestion_id,
-            status=ingestion_status,
-        )
+            finalize_ingestion(
+                connection,
+                ingestion_id=ingestion_id,
+                status=ingestion_status,
+                content_sha256=content_sha256,
+            )
 
     return ReportPersistenceResult(
         complete=complete,
         rows_saved=rows_saved,
         rows_with_warnings=rows_with_warnings,
-        unsupported_reports=tuple(
-            unsupported_reports
-        ),
-        unclassified_sheets=tuple(
-            unclassified_sheets
-        ),
-        structure_changes=tuple(
-            structure_changes
-        ),
+        ingestion_id=ingestion_id,
+        unsupported_reports=tuple(unsupported_reports),
+        unclassified_sheets=tuple(unclassified_sheets),
+        structure_changes=tuple(structure_changes),
     )
+

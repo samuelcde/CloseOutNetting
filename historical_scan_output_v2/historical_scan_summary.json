@@ -1,0 +1,26 @@
+{
+  "root": "\\\\100.100.32.152\\Publico_SET-ICAP\\Publico\\aprendiz juan\\documentos closeoutnetting",
+  "files_found": 5800,
+  "sheet_records": 11783,
+  "unique_structures": 217,
+  "status_counts": {
+    "EMPTY_OR_NO_HEADER": 933,
+    "OK": 9967,
+    "OPEN_ERROR": 15,
+    "PASSWORD_FAILED": 54,
+    "PASSWORD_REQUIRED": 814
+  },
+  "open_method_counts": {
+    "CSV_cp1252": 1,
+    "CSV_utf-8-sig": 2,
+    "HTML_XLS": 842,
+    "HTML_XLSX": 35,
+    "MSOFFCRYPTO": 868,
+    "MSOFFCRYPTO_OPENPYXL": 6702,
+    "MSOFFCRYPTO_XLRD": 3,
+    "OPENPYXL": 3318,
+    "XLRD": 12
+  },
+  "inventory_csv": "C:\\Users\\scardenas\\auto-closeoutnetting\\historical_scan_output_v2\\historical_structure_inventory.csv",
+  "structures_csv": "C:\\Users\\scardenas\\auto-closeoutnetting\\historical_scan_output_v2\\historical_structure_summary.csv"
+}

@@ -1,0 +1,33 @@
+{
+  "root": "\\\\100.100.32.152\\Publico_SET-ICAP\\Publico\\aprendiz juan\\documentos closeoutnetting",
+  "inventory_csv": "C:\\Users\\scardenas\\auto-closeoutnetting\\historical_scan_output_v2\\historical_structure_inventory.csv",
+  "year_range": {
+    "min": 2018,
+    "max": 2026
+  },
+  "include_undated": false,
+  "sample_rows_per_file": 1000,
+  "files_per_structure": 1,
+  "eligible_inventory_records": 9700,
+  "selected_samples": 188,
+  "profiled_structures_ok": 188,
+  "profile_errors": 0,
+  "profiled_columns": 8723,
+  "union_fields": 947,
+  "entities_profiled": [
+    "BBVA",
+    "CITI",
+    "DESCONOCIDA",
+    "FICC",
+    "GS",
+    "MORGAN_STANLEY",
+    "SET-ICAP",
+    "SMBC",
+    "STANDARD"
+  ],
+  "outputs": {
+    "columns_csv": "C:\\Users\\scardenas\\auto-closeoutnetting\\historical_profile_output\\historical_profile_columns.csv",
+    "structures_csv": "C:\\Users\\scardenas\\auto-closeoutnetting\\historical_profile_output\\historical_profile_structures.csv",
+    "field_union_csv": "C:\\Users\\scardenas\\auto-closeoutnetting\\historical_profile_output\\historical_field_union.csv"
+  }
+}
