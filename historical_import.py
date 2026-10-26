@@ -1,4 +1,5 @@
 from __future__ import annotations
+import traceback
 
 import argparse
 import hashlib
@@ -1117,11 +1118,18 @@ def update_content_hash(
         "sheet": sheet.sheet_name,
         "cells": sorted(
             (
-                str(cell["normalized_header"]),
-                _canonical_json_value(cell["value"]),
-            )
-            for cell in source_cells
-        ),
+                (
+                    str(cell["normalized_header"]),
+                    _canonical_json_value(
+                        cell.get("value")
+                    ),
+                )
+                for cell in source_cells
+            ),
+            key=lambda item: (
+                "" if item[0] is None else str(item[0])
+            ),
+        ),    
     }
     digest.update(
         json.dumps(
@@ -1601,9 +1609,17 @@ def main() -> int:
             # --retry-failed si esa opci?n existe.
             # -----------------------------------------------
 
-            elif getattr(args, "retry_failed", False):
+            elif (
+                getattr(args, "retry_failed", False)
+                and previous_status == "historical_db_error"
+            ):
 
-                pass
+                retry_ingestion_id = previous_id
+
+                print(
+                    f"  REINTENTO DB ERROR: "
+                    f"ingestion_id={previous_id}"
+                )
 
             else:
 
@@ -1924,6 +1940,17 @@ def main() -> int:
             counters["duplicate_content"] += 1
 
         except Exception as exc:
+            print("\n" + "=" * 100)
+            print("ERROR HISTORICAL DB")
+            print("Archivo:", first.filename)
+            print("Entidad:", entity)
+            print("ingestion_id:", ingestion_id)
+            print("Tipo:", type(exc).__name__)
+            print("Error:", repr(exc))
+            traceback.print_exc()
+            print("=" * 100 + "\n")
+
+
             try:
                 set_ingestion_status(
                     ingestion_id=ingestion_id,

@@ -1099,6 +1099,12 @@
       "sheet_regex": "^CSS$",
       "structure_hash": "616af76a157a591217f2",
       "market_type": "CCS"
+    },
+    {
+      "entity": "MORGAN_STANLEY",
+      "sheet_regex": "^Sheet1$",
+      "structure_hash": "7a6eebdb9db882455429",
+      "market_type": "FORWARD"
     }
   ],
   "ignored_sheet_rules": [
@@ -1303,7 +1309,9 @@
     "GS": {},
     "MORGAN_STANLEY": {
       "account_number": "account_number",
-      "taps_numbers": "taps_account_id"
+      "taps_numbers": "taps_account_id",
+      "principal_party_name": "counterparty_name",
+      "trading_name": "trading_name"
     },
     "STANDARD": {},
     "FICC": {},
