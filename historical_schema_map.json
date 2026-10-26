@@ -1301,7 +1301,10 @@
       "clearing_member": "nombre_de_entidad"
     },
     "GS": {},
-    "MORGAN_STANLEY": {},
+    "MORGAN_STANLEY": {
+      "account_number": "account_number",
+      "taps_numbers": "taps_account_id"
+    },
     "STANDARD": {},
     "FICC": {},
     "CITI": {},
