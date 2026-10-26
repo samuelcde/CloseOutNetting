@@ -7,7 +7,7 @@ import re
 import sys
 import unicodedata
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -85,6 +85,15 @@ def parse_args() -> argparse.Namespace:
             "source_filename/file_sha256 ya registrada pero no finalizada."
         ),
     )
+    parser.add_argument(
+        "--retry-partial",
+        action="store_true",
+        help=(
+            "Reintenta ?nicamente ingestas con status=partial "
+            "reutilizando el mismo ingestion_id."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -421,6 +430,50 @@ _GENERIC_HEADER_LABELS = {
 }
 
 
+def _looks_like_instruction_row(
+    row: list[Any],
+) -> bool:
+    """
+    Detecta filas hist?ricas que describen obligatoriedad
+    de columnas en lugar de contener una operaci?n real.
+
+    Ejemplo GS:
+        MANDATORY | MANDATORY | MANDATORY | ...
+
+    Se exige:
+      - m?nimo 3 celdas no vac?as;
+      - al menos 60% de ellas deben ser marcadores estructurales.
+    """
+
+    non_blank = [
+        value
+        for value in row
+        if not _blank(value)
+    ]
+
+    if len(non_blank) < 3:
+        return False
+
+    structural_markers = {
+        "mandatory",
+        "required",
+        "optional",
+    }
+
+    matches = 0
+
+    for value in non_blank:
+        normalized = str(value).strip().lower()
+
+        if normalized in structural_markers:
+            matches += 1
+
+    return (
+        matches >= 3
+        and matches / len(non_blank) >= 0.60
+    )
+
+
 def _looks_like_repeated_header(
     *,
     entity: str,
@@ -634,22 +687,62 @@ DATETIME_FORMATS = (
 def _to_date(value: Any) -> date | None:
     if _blank(value):
         return None
+
     if isinstance(value, datetime):
         return value.date()
+
     if isinstance(value, date):
         return value
 
-    text = str(value).strip()
+    # --------------------------------------------------------
+    # Fechas seriales de Excel
+    #
+    # Ejemplos hist?ricos GS:
+    #   44169 -> 2020-12-04
+    #   44174 -> 2020-12-09
+    #
+    # Excel utiliza como base pr?ctica 1899-12-30.
+    # --------------------------------------------------------
+
+    if isinstance(value, (int, float, Decimal)):
+        serial = float(value)
+
+        # Rango conservador para evitar interpretar IDs como fechas.
+        # Aproximadamente a?os 1900-2173.
+        if 1 <= serial <= 100000:
+            return (
+                datetime(1899, 12, 30)
+                + timedelta(days=serial)
+            ).date()
+
+    text_value = str(value).strip()
+
+    # Tambi?n puede venir como texto num?rico.
+    if re.fullmatch(r"\d+(?:\.\d+)?", text_value):
+        serial = float(text_value)
+
+        if 1 <= serial <= 100000:
+            return (
+                datetime(1899, 12, 30)
+                + timedelta(days=serial)
+            ).date()
+
     try:
-        return date.fromisoformat(text)
+        return date.fromisoformat(text_value)
     except Exception:
         pass
+
     for fmt in DATE_FORMATS:
         try:
-            return datetime.strptime(text, fmt).date()
+            return datetime.strptime(
+                text_value,
+                fmt
+            ).date()
         except ValueError:
             pass
-    raise ValueError(text)
+
+    raise ValueError(text_value)
+
 
 
 def _to_datetime(value: Any) -> datetime | None:
@@ -1078,6 +1171,71 @@ def project_canonical(
             )
 
 
+def resolve_gs_row_market(
+    *,
+    entity: str,
+    sheet: InventorySheet,
+    default_market: str,
+    source_cells: list[dict[str, Any]],
+) -> str:
+    """
+    Refina market_type a nivel de FILA para hist?ricos GS.
+
+    Sheet3 es una hoja mixta. No todas sus operaciones son FORWARD.
+
+    Clasificaci?n validada contra los hist?ricos:
+
+        Forward                 -> FORWARD
+        Cash Settled Forward    -> FORWARD
+        Bond Forward Tradable   -> FORWARD
+        CT Swap                 -> IRS
+
+    Si la fila no corresponde a GS/Sheet3 o no reconocemos
+    tradableType, se conserva el mercado determinado a nivel de hoja.
+    """
+
+    if str(entity).upper() != "GS":
+        return default_market
+
+    sheet_name = str(
+        sheet.sheet_name or ""
+    ).strip().upper()
+
+    if sheet_name != "SHEET3":
+        return default_market
+
+    tradable_type = ""
+
+    for cell in source_cells:
+
+        normalized_header = str(
+            cell.get("normalized_header") or ""
+        ).strip().lower()
+
+        if normalized_header == "tradabletype":
+
+            value = cell.get("value")
+
+            if value is not None:
+                tradable_type = " ".join(
+                    str(value).strip().upper().split()
+                )
+
+            break
+
+    if tradable_type in {
+        "FORWARD",
+        "CASH SETTLED FORWARD",
+        "BOND FORWARD TRADABLE",
+    }:
+        return "FORWARD"
+
+    if tradable_type == "CT SWAP":
+        return "IRS"
+
+    return default_market
+
+
 def insert_row(
     connection,
     *,
@@ -1386,6 +1544,7 @@ def main() -> int:
         "ignored": 0,
         "rows_saved": 0,
         "repeated_header_rows_skipped": 0,
+        "instruction_rows_skipped": 0,
         "date_time_pairs_realigned": 0,
         "semantic_alias_values_mapped": 0,
     }
@@ -1413,13 +1572,49 @@ def main() -> int:
                 file_sha256=first.file_sha256 or None,
             )
 
-        if previous and not args.retry_failed:
-            print(
-                f"  OMITIDO: intento ya registrado "
-                f"(ingestion_id={previous[0]}, status={previous[1]})."
-            )
-            counters["already_attempted"] += 1
-            continue
+        retry_ingestion_id = None
+
+        if previous:
+
+            previous_id = previous[0]
+            previous_status = previous[1]
+
+            # -----------------------------------------------
+            # Reintento especial de PARTIAL:
+            # reutiliza exactamente el mismo ingestion_id.
+            # -----------------------------------------------
+
+            if (
+                getattr(args, "retry_partial", False)
+                and previous_status == "partial"
+            ):
+
+                retry_ingestion_id = previous_id
+
+                print(
+                    f"  REINTENTO PARTIAL: "
+                    f"ingestion_id={previous_id}"
+                )
+
+            # -----------------------------------------------
+            # Mantener comportamiento existente de
+            # --retry-failed si esa opci?n existe.
+            # -----------------------------------------------
+
+            elif getattr(args, "retry_failed", False):
+
+                pass
+
+            else:
+
+                print(
+                    f"  OMITIDO: intento ya registrado "
+                    f"(ingestion_id={previous_id}, "
+                    f"status={previous_status})."
+                )
+
+                counters["already_attempted"] += 1
+                continue
 
         ok_sheets = [
             sheet
@@ -1495,16 +1690,32 @@ def main() -> int:
             )
             continue
 
-        ingestion_id = register_ingestion_attempt(
-            entity=entity,
-            source_filename=first.filename,
-            source_year=first.source_year,
-            file_sha256=first.file_sha256 or None,
-            content_sha256=None,
-            size_bytes=first.size_bytes,
-            received_at=None,
-            status="historical_pending",
-        )
+        if retry_ingestion_id is not None:
+
+            ingestion_id = retry_ingestion_id
+
+            set_ingestion_status(
+                ingestion_id=ingestion_id,
+                status="historical_pending",
+            )
+
+            print(
+                f"  reutilizando ingestion_id="
+                f"{ingestion_id}"
+            )
+
+        else:
+
+            ingestion_id = register_ingestion_attempt(
+                entity=entity,
+                source_filename=first.filename,
+                source_year=first.source_year,
+                file_sha256=first.file_sha256 or None,
+                content_sha256=None,
+                size_bytes=first.size_bytes,
+                received_at=None,
+                status="historical_pending",
+            )
 
         rows_saved = 0
         rows_warning = 0
@@ -1562,6 +1773,14 @@ def main() -> int:
                         ):
                             continue
 
+                        if _looks_like_instruction_row(
+                            row
+                        ):
+                            counters[
+                                "instruction_rows_skipped"
+                            ] += 1
+                            continue
+
                         if _looks_like_repeated_header(
                             entity=entity,
                             sheet=sheet,
@@ -1581,9 +1800,24 @@ def main() -> int:
                         if not source_cells:
                             continue
 
+                        # -----------------------------------------
+                        # Refinar market_type a nivel de operaci?n.
+                        #
+                        # Especialmente importante para GS/Sheet3,
+                        # que contiene FORWARD y CT Swap (IRS)
+                        # dentro de la misma hoja.
+                        # -----------------------------------------
+
+                        row_market_type = resolve_gs_row_market(
+                            entity=entity,
+                            sheet=sheet,
+                            default_market=market_type,
+                            source_cells=source_cells,
+                        )
+
                         update_content_hash(
                             digest,
-                            market_type=market_type,
+                            market_type=row_market_type,
                             sheet=sheet,
                             source_cells=source_cells,
                         )
@@ -1597,7 +1831,7 @@ def main() -> int:
                             table_name=table_name,
                             column_types=column_types,
                             ingestion_id=ingestion_id,
-                            market_type=market_type,
+                            market_type=row_market_type,
                             sheet=sheet,
                             row=row,
                             mapping=mapping,

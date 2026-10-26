@@ -1093,6 +1093,12 @@
       "entity": "SMBC",
       "sheet_regex": "^Next\\s*Day$",
       "market_type": "NEXT_DAY"
+    },
+    {
+      "entity": "GS",
+      "sheet_regex": "^CSS$",
+      "structure_hash": "616af76a157a591217f2",
+      "market_type": "CCS"
     }
   ],
   "ignored_sheet_rules": [
