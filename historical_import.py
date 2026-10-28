@@ -1472,6 +1472,7 @@ def status_from_scan(scan_status: str) -> str:
     mapping = {
         "PASSWORD_REQUIRED": "password_required",
         "PASSWORD_FAILED": "password_failed",
+        "DRM_PROTECTED": "drm_protected",
         "OPEN_ERROR": "open_error",
         "OPEN_ERROR_AFTER_DECRYPT": "open_error",
         "EMPTY_OR_NO_HEADER": "empty_no_header",

@@ -976,12 +976,43 @@ def scan_csv(path: Path, max_header_scan: int) -> list[SheetScan]:
     ]
 
 
+
+
+def _detect_drm_protection(path: Path) -> list[SheetScan] | None:
+    """Reconoce Office DRM/IRM por estructuras OLE; no intenta descifrar."""
+    try:
+        with path.open("rb") as handle:
+            if handle.read(8) != bytes.fromhex("d0cf11e0a1b11ae1"):
+                return None
+        import olefile
+        with olefile.OleFileIO(str(path)) as ole:
+            streams = {"/".join(parts) for parts in ole.listdir(streams=True, storages=False)}
+        if ("EncryptedPackage" in streams
+            and any("DRMEncryptedDataSpace" in name for name in streams)
+            and any("DRMEncryptedTransform" in name for name in streams)):
+            return [SheetScan(
+                sheet_name="", header_row=None, headers=[], normalized_headers=[],
+                structure_hash=None, data_rows_estimate=None,
+                scan_status="DRM_PROTECTED", open_method="OLE_DRM",
+                error="Documento Office protegido por DRM/IRM; requiere acceso autorizado."
+            )]
+    except ImportError:
+        return None  # La auditoría separada sí exige olefile.
+    except Exception:
+        return None  # Mantener el manejo preexistente del escáner.
+    return None
+
 def scan_file(
     path: Path,
     max_header_scan: int,
     *,
     passwords: tuple[str, ...],
 ) -> list[SheetScan]:
+    if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+        drm_result = _detect_drm_protection(path)
+        if drm_result is not None:
+            return drm_result
+
     suffix = path.suffix.lower()
 
     if suffix in {".xlsx", ".xlsm"}:

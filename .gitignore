@@ -10,3 +10,16 @@ state/
 
 *.db
 *.part
+
+# Ignorar todos los archivos de datos y logs
+*.csv
+*/.csv
+*.cvs/
+*.log
+
+# Ignorar archivos temporales o de estado autogenerados
+actualizar_estados_drm_stand*
+
+# Optimización adicional: ignorar todos los backups
+*.bak*
+*.sql

@@ -6,4 +6,5 @@ pandas
 openpyxl
 xlrd
 msoffcrypto-tool
+olefile
 psycopg[binary]
