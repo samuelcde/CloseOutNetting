@@ -98,19 +98,22 @@ def build_safe_destination(
     download_root: Path,
     entity: str,
     filename: str,
+    source_year: int,
 ) -> Path:
 
-    root = download_root.resolve(
-        strict=False
-    )
+    root = download_root.resolve(strict=False)
+
+    if not isinstance(source_year, int) or not 1900 <= source_year <= 2200:
+        raise SecurityValidationError(
+            f"Año de descarga inválido: {source_year!r}"
+        )
+
+    year_directory = root / str(source_year)
 
     entity_directory = (
-        root / entity
-    ).resolve(
-        strict=False
-    )
+        year_directory / entity
+    ).resolve(strict=False)
 
-    # Bloqueo de traversal también para la entidad.
     if not entity_directory.is_relative_to(root):
         raise SecurityValidationError(
             "Ruta de entidad fuera del directorio permitido."
@@ -122,15 +125,10 @@ def build_safe_destination(
     )
 
     destination = (
-        entity_directory /
-        filename
-    ).resolve(
-        strict=False
-    )
+        entity_directory / filename
+    ).resolve(strict=False)
 
-    if not destination.is_relative_to(
-        entity_directory
-    ):
+    if not destination.is_relative_to(entity_directory):
         raise SecurityValidationError(
             "Intento de Path Traversal detectado."
         )

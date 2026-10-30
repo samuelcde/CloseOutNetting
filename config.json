@@ -25,7 +25,8 @@
     "set-icap.co": "SET-ICAP",
     "baml.com": "FICC",
     "smbc-cm.com ": "SMBC",
-    "bbva.com": "BBVA"
+    "bbva.com": "BBVA",
+    "bofa.com":"FICC"
   },
   "parser": {
     "max_rows_per_table": 100000,

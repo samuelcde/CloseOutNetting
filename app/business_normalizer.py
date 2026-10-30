@@ -399,6 +399,12 @@ def _validate_ingestion(
 
 
 ENTITY_TABLES: dict[str, str] = {
+    "FICC": "closenetting.raw_report_ficc",
+    "CITI": "closenetting.raw_report_citi",
+    "BLADEX": "closenetting.raw_report_bladex",
+    "BBVA": "closenetting.raw_report_bbva",
+    "SET-ICAP": "closenetting.raw_report_set_icap",
+    "STANDARD": "closenetting.raw_report_standard",
     "SMBC": "closenetting.raw_report_smbc",
     "GS": "closenetting.raw_report_gs",
     "MORGAN_STANLEY": (
@@ -1311,6 +1317,216 @@ def _save_table(
     return rows_saved, rows_with_warnings
 
 
+
+
+# ============================================================
+# ENTIDADES ADICIONALES (REUTILIZAN EL MAPEO HISTORICO)
+# ============================================================
+# Mantener el motor especializado existente para GS, SMBC y MORGAN_STANLEY.
+# No se aceptan nombres de tabla provenientes de Excel o mensajes externos.
+
+_ADDITIONAL_ENTITIES = frozenset({
+    "FICC", "CITI", "BLADEX", "BBVA", "SET-ICAP", "STANDARD"
+})
+
+
+def _historical_mapping() -> dict[str, Any]:
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parent.parent / "historical_schema_map.json"
+    mapping = json.loads(path.read_text(encoding="utf-8-sig"))
+    for entity in (*_ADDITIONAL_ENTITIES, "MORGAN_STANLEY"):
+        if entity not in mapping.get("tables", {}) or entity not in mapping.get("columns", {}):
+            raise RuntimeError(f"Falta el mapeo historico de {entity}")
+    return mapping
+
+
+def _extra_market(entity: str, sheet_name: str, mapping: dict[str, Any], table: ParsedTable | None = None) -> tuple[str, list[dict[str, Any]]]:
+    import re
+    issues = []
+    for rule in mapping.get("market_overrides", []):
+        if rule.get("entity") == entity and not rule.get("structure_hash"):
+            if re.search(rule["sheet_regex"], sheet_name, flags=re.IGNORECASE):
+                return str(rule["market_type"]).upper(), issues
+
+    # Los nombres no ambiguos son admisibles. 'Sheet1' o 'Data' nunca
+    # se interpretan arbitrariamente como FORWARD.
+    aliases = {
+        "forward": "FORWARD", "ndf": "FORWARD", "irs": "IRS",
+        "ccs": "CCS", "options": "OPTIONS", "option": "OPTIONS",
+        "opciones": "OPCIONES", "spot": "SPOT",
+        "next_day": "NEXT_DAY", "css": "CSS",
+        "cop_registration": "COP_REGISTRATION",
+    }
+    name = normalize_name(sheet_name)
+    if entity == "BBVA" and name == "irs_ois":
+        return "IRS", issues
+    if entity == "STANDARD" and name == "sheetone" and table is not None:
+        # Formato de reporte STANDARD: encabezados españoles y NDF como producto.
+        # No clasificar SheetOne solamente por su nombre.
+        headers = {normalize_name(h) for h in table.source_headers}
+        signature = {"mercado", "hora_negociacion", "fecha_negociacion",
+                     "standard_chartered_comprador_vendedor",
+                     "compania_1_standard_chartered_entity"}
+        if signature <= headers:
+            records = table.raw_records()
+            if records:
+                market_values = [str(c.get("value") or "").strip().upper()
+                                 for c in records[0]["source_cells"]
+                                 if normalize_name(c.get("header")) == "mercado"]
+                if market_values == ["FOREIGNEXCHANGE:NDF"]:
+                    return "FORWARD", issues
+    if name in aliases:
+        return aliases[name], issues
+    issues.append({
+        "source": "normalizer", "code": "UNCLASSIFIED_MARKET",
+        "sheet": sheet_name,
+    })
+    return "DESCONOCIDO", issues
+
+
+def _extra_table_columns(connection: Connection, table_name: str) -> dict[str, str]:
+    with connection.cursor() as cur:
+        cur.execute("""
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'closenetting' AND table_name = %s
+        """, (table_name,))
+        return {name: typ for name, typ in cur.fetchall()}
+
+
+def _save_extra_table(
+    connection: Connection, *, ingestion_id: int, entity: str,
+    market_type: str, table: ParsedTable, base_issues: list[dict[str, Any]],
+    mapping: dict[str, Any],
+) -> tuple[int, int]:
+    # Reusar los conversores historicos: evita definir un segundo conjunto
+    # de reglas para fechas Excel, numeros, booleanos y alias.
+    from historical_import import convert_for_db, project_canonical
+    from psycopg import sql
+
+    raw_table_name = mapping["tables"][entity]
+    if raw_table_name != ENTITY_TABLES[entity].split(".", 1)[1]:
+        raise RuntimeError(f"Tabla del mapa no coincide para {entity}")
+    column_types = _extra_table_columns(connection, raw_table_name)
+    allowed = set(mapping["columns"][entity])
+    common_aliases = mapping.get("common_column_aliases", {})
+    entity_aliases = mapping.get("entity_column_aliases", {}).get(entity, {})
+    count = warnings = 0
+
+    for raw_record in table.raw_records():
+        # No se modifica `cells`: es la evidencia extraída del archivo.
+        # Todas las transformaciones se realizan sobre valores separados.
+        cells = raw_record["source_cells"]
+        issues = list(base_issues) + _parser_issues(raw_record)
+        values: dict[str, Any] = {}
+        value_sources: dict[str, dict[str, Any]] = {}
+        seen_headers: dict[str, Any] = {}
+
+        for index, cell in enumerate(cells, start=1):
+            original_header = cell.get("header")
+            source = normalize_name(original_header)
+            if not source:
+                continue
+            raw = cell.get("value")
+            origin = {
+                "source_header": str(original_header),
+                "source_ordinal": cell.get("ordinal", index),
+            }
+
+            # Dos encabezados iguales no autorizan a descartar el segundo valor.
+            # Si difieren, se conserva la primera ocurrencia y se genera evidencia.
+            if source in seen_headers and seen_headers[source] != raw:
+                issues.append({
+                    "source": "normalizer", "code": "DUPLICATE_HEADER_CONFLICT",
+                    "column": source, **origin,
+                    "previous_value": json_safe(seen_headers[source]),
+                    "value": json_safe(raw),
+                })
+                continue
+            seen_headers.setdefault(source, raw)
+
+            intermediate = common_aliases.get(source, source)
+            target = entity_aliases.get(intermediate, entity_aliases.get(source, intermediate))
+            if entity == "CITI" and market_type == "FORWARD" and target == "comprador_compania" and "comprador_compaia" in allowed:
+                target = "comprador_compaia"
+
+            if target not in allowed:
+                if not _is_blank(raw):
+                    issues.append({
+                        "source": "normalizer", "code": "UNMAPPED_HISTORICAL_COLUMN",
+                        "column": source, **origin, "value": json_safe(raw),
+                    })
+                continue
+
+            if target in values:
+                previous = values[target]
+                if not _is_blank(previous) and not _is_blank(raw) and str(previous) != str(raw):
+                    issues.append({
+                        "source": "normalizer", "code": "COLUMN_ALIAS_CONFLICT",
+                        "field": target, "source_column": source, **origin,
+                        "previous_value": json_safe(previous), "value": json_safe(raw),
+                    })
+                    continue
+                if not _is_blank(previous):
+                    continue
+            values[target] = raw
+            value_sources[target] = {"source_column": source, **origin}
+
+        if entity == "MORGAN_STANLEY":
+            # Mismos campos canónicos que la carga histórica, sin alterar el origen.
+            raw_values = {normalize_name(c.get("header")): c.get("value") for c in cells
+                          if normalize_name(c.get("header"))}
+            project_canonical(entity=entity, market_type=market_type,
+                              raw_values=raw_values, mapping=mapping,
+                              values=values, issues=issues)
+
+        converted: dict[str, Any] = {}
+        for col, raw in values.items():
+            if col not in column_types:
+                issues.append({
+                    "source": "normalizer", "code": "DESTINATION_COLUMN_MISSING",
+                    "column": col, **value_sources.get(col, {}),
+                })
+                continue
+
+            db_raw = raw
+            if column_types[col].lower() == "date" and isinstance(raw, str):
+                # Una fecha y hora ISO inequívoca se puede representar como DATE;
+                # no se altera ni se reescribe la celda original.
+                try:
+                    if "T" in raw or " " in raw:
+                        db_raw = datetime.fromisoformat(raw.strip()).date()
+                except ValueError:
+                    pass
+
+            conversion_issues: list[dict[str, Any]] = []
+            converted[col] = convert_for_db(
+                db_raw, column_types[col], field=col, issues=conversion_issues
+            )
+            for issue in conversion_issues:
+                detail = dict(issue)
+                # La evidencia utiliza el valor REAL de la celda, no el
+                # valor intermedio entregado a convert_for_db.
+                detail.update(value_sources.get(col, {}))
+                detail["value"] = json_safe(raw)
+                detail["source"] = "normalizer"
+                issues.append(detail)
+
+        columns = ["ingestion_id", "market_type", "source_sheet_name", *sorted(converted), "original_message", "validation_issues"]
+        params = [ingestion_id, market_type, table.name, *(converted[k] for k in sorted(converted)), Jsonb(json_safe(cells)), Jsonb(json_safe(issues))]
+        query = sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+            sql.Identifier("closenetting"), sql.Identifier(raw_table_name),
+            sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+            sql.SQL(", ").join(sql.Placeholder() for _ in columns)
+        )
+        with connection.cursor() as cur:
+            cur.execute(query, params)
+        count += 1
+        warnings += bool(issues)
+    return count, warnings
+
+
 # ============================================================
 # DESPACHADOR
 # ============================================================
@@ -1348,7 +1564,30 @@ def save_report_data(
         ]
     ] = []
 
+    extra_mapping = _historical_mapping() if entity_key in _ADDITIONAL_ENTITIES else None
+    extra_plans: list[tuple[ParsedTable, str, list[dict[str, Any]]]] = []
+
     for sheet_name, table in report.tables.items():
+        if entity_key == "MORGAN_STANLEY":
+            from .report_classifier import is_morgan_exception_cash, is_morgan_auxiliary_pivot
+            if is_morgan_auxiliary_pivot(table):
+                continue  # Tabla de agregados, no transacciones.
+            if is_morgan_exception_cash(table):
+                # Variante distinta de FX/Cash habitual: usar reglas históricas
+                # sobre columnas originales para evitar perder información.
+                if extra_mapping is None:
+                    extra_mapping = _historical_mapping()
+                extra_plans.append((table, "FORWARD", []))
+                continue
+
+        if extra_mapping is not None and entity_key in _ADDITIONAL_ENTITIES:
+            market, market_issues = _extra_market(entity_key, sheet_name, extra_mapping, table=table)
+            if market == "DESCONOCIDO":
+                unclassified_sheets.append(sheet_name)
+                continue
+            extra_plans.append((table, market, market_issues))
+            continue
+
         classification = classify_table(
             entity=entity_key,
             table=table,
@@ -1439,7 +1678,7 @@ def save_report_data(
             entity=entity_key,
         )
 
-        if not plans:
+        if not plans and not extra_plans:
             update_ingestion_status(
                 connection,
                 ingestion_id=ingestion_id,
@@ -1474,6 +1713,20 @@ def save_report_data(
 
             rows_saved += saved
             rows_with_warnings += warnings
+
+        if extra_mapping is not None:
+            for extra_table, extra_market, extra_issues in extra_plans:
+                saved, warnings = _save_extra_table(
+                    connection,
+                    ingestion_id=ingestion_id,
+                    entity=entity_key,
+                    market_type=extra_market,
+                    table=extra_table,
+                    base_issues=extra_issues,
+                    mapping=extra_mapping,
+                )
+                rows_saved += saved
+                rows_with_warnings += warnings
 
         if rows_saved <= 0:
             update_ingestion_status(

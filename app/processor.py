@@ -294,15 +294,22 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         continue
 
                     try:
+                        download_year = (
+                            _source_year(message_received_at)
+                            or datetime.now().year
+                        )
+
                         base_destination = build_safe_destination(
                             settings.download_dir,
                             entity,
                             filename,
+                            download_year,
                         )
                         staging_destination = build_safe_destination(
                             settings.download_dir,
                             entity,
                             f".cln-{uuid.uuid4().hex}{extension}",
+                            download_year,
                         )
                     except SecurityValidationError as exc:
                         logger.warning(
@@ -393,6 +400,39 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             " | Motivo: dominio no configurado"
                         )
 
+                        final_destination = _resolve_final_destination(
+                            base_destination,
+                            attachment_id,
+                            sha256,
+                        )
+                        os.replace(
+                            staging_destination, 
+                            final_destination
+                        )
+                        set_ingestion_status(
+                            ingestion_id=ingestion_id,
+                            status="unknown_entity",
+                        )
+                        mark_processed(
+                            message_id=message_id,
+                            attachment_id=attachment_id,
+                            entity=entity,
+                            filename=filename,
+                            local_path=final_destination,
+                            size_bytes=size_bytes,
+                            sha256=sha256,
+                            content_sha256=None,
+                            status="unknown_entity",
+                        )
+                        logger.info(
+                            "Entidad desconocida registrada sin persistencia "
+                            "operativa | Archivo: %s | Remitente: %s "
+                            "| Ingestion ID: %s",
+                            filename,
+                            sender_address,
+                            ingestion_id,
+                        )
+                        continue
                     # ========================================================
                     # DUPLICADO BINARIO
                     # ========================================================

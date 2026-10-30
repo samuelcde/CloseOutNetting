@@ -1374,6 +1374,26 @@ def _build_structure_issues(
 
 
 
+def is_morgan_exception_cash(table: ParsedTable) -> bool:
+    """Firma explícita del formato FX Exception Report; no basta el nombre Cash."""
+    if normalize_name(table.name) != "cash":
+        return False
+    headers = {normalize_name(h) for h in table.source_headers}
+    required = {"region", "status", "comment", "order_number", "trade_version", "deriv1_cesexceptioncode"}
+    return required <= headers
+
+
+def is_morgan_auxiliary_pivot(table: ParsedTable) -> bool:
+    """Solo dos hojas pivot conocidas y verificadas por sus encabezados."""
+    name = normalize_name(table.name)
+    headers = {normalize_name(h) for h in table.source_headers}
+    if name == "cash_pivot":
+        return {"row_labels", "count"} <= headers
+    if name == "option_pivot":
+        return "etiquetas_de_fila" in headers
+    return False
+
+
 def classify_table(
 
     *,

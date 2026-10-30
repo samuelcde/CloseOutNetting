@@ -1313,7 +1313,9 @@
       "trading_name": "trading_name"
     },
     "STANDARD": {},
-    "FICC": {},
+    "FICC": {
+      "buy_sell": "buysell"
+    },
     "CITI": {},
     "BBVA": {},
     "BLADEX": {},

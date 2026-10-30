@@ -851,6 +851,7 @@ def parse_report(
                 display_name=path.name,
 
                 config=config,
+                entity=entity_key,
 
             )
 
@@ -1807,6 +1808,7 @@ def _parse_xlsx(
     display_name: str,
 
     config: ParserConfig,
+    entity: str = "",
 
 ) -> dict[str, ParsedTable]:
 
@@ -2057,6 +2059,7 @@ def _parse_xlsx(
                     physical_rows=physical_rows,
 
                     config=config,
+                    entity=entity,
 
                 )
 
@@ -3439,6 +3442,23 @@ def _choose_primary_header(
     return 0
 
 
+def _is_standard_english_secondary_header(primary_header: list[Any], row: list[Any]) -> bool:
+    """Solo la firma exacta del encabezado bilingüe conocido de STANDARD."""
+    expected = (
+        ("mercado", "market"),
+        ("hora_negociacion", "time_negotiation"),
+        ("fecha_negociacion", "date_negotiation"),
+        ("standard_chartered_comprador_vendedor", "standard_chartered_buy_sell_indicator"),
+        ("compania_1_standard_chartered_entity", "party_1_standard_chartered_entity"),
+    )
+    if len(primary_header) < 5 or len(row) < 5:
+        return False
+    return tuple(
+        (_normalize_header_text(primary_header[i]), _normalize_header_text(row[i]))
+        for i in range(5)
+    ) == expected
+
+
 def _build_parsed_table(
 
     *,
@@ -3452,6 +3472,7 @@ def _build_parsed_table(
     ],
 
     config: ParserConfig,
+    entity: str = "",
 
 ) -> ParsedTable | None:
 
@@ -3604,6 +3625,16 @@ def _build_parsed_table(
     ) in data_candidates:
 
 
+
+        if (entity == "STANDARD" and sheet_name.strip().lower() == "sheetone"
+                and _is_standard_english_secondary_header(header_values, values)):
+            structural_rows.append({
+                "kind": "SECONDARY_HEADER_BILINGUAL_STANDARD",
+                "source_row_number": row_number,
+                "values": tuple(values),
+            })
+            logger.info("STANDARD: encabezado bilingüe excluido de operaciones, fila %s", row_number)
+            continue
 
         score = _header_like_score(
 
