@@ -149,6 +149,7 @@ def create_ingestion(
     *,
     entity: str,
     source_filename: str,
+    source_path: str | None = None,
     source_year: int | None = None,
     file_sha256: str | None = None,
     content_sha256: str | None = None,
@@ -178,6 +179,7 @@ def create_ingestion(
                 entity,
                 source_year,
                 source_filename,
+                source_path,
                 file_sha256,
                 content_sha256,
                 size_bytes,
@@ -187,7 +189,7 @@ def create_ingestion(
             )
             VALUES (
                 %s, %s, %s, %s, %s,
-                %s, %s, %s, NULL
+                %s, %s, %s, %s, NULL
             )
             RETURNING id
             """,
@@ -195,6 +197,7 @@ def create_ingestion(
                 entity,
                 normalized_year,
                 source_filename,
+                source_path,
                 file_sha256,
                 content_sha256,
                 size_bytes,
@@ -217,6 +220,7 @@ def register_ingestion_attempt(
     *,
     entity: str,
     source_filename: str,
+    source_path: str | None = None,
     source_year: int | None = None,
     file_sha256: str | None = None,
     content_sha256: str | None = None,
@@ -236,6 +240,7 @@ def register_ingestion_attempt(
             connection,
             entity=entity,
             source_filename=source_filename,
+            source_path=source_path,
             source_year=source_year,
             file_sha256=file_sha256,
             content_sha256=content_sha256,
@@ -243,6 +248,35 @@ def register_ingestion_attempt(
             received_at=received_at,
             status=status,
         )
+
+
+def set_ingestion_source_path(
+    *,
+    ingestion_id: int,
+    source_path: str,
+) -> None:
+    """Registra la ubicación definitiva de un archivo.
+
+    No modifica estado, hashes ni filas de operaciones.
+    """
+    if not source_path or not source_path.strip():
+        raise ValueError("source_path no puede estar vacío")
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE closenetting.ingestion_files
+                SET source_path = %s
+                WHERE id = %s
+                """,
+                (source_path, ingestion_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    f"No se actualizó source_path "
+                    f"de ingestion_id={ingestion_id}"
+                )
 
 
 def update_ingestion_status(

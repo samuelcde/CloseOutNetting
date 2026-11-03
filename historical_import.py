@@ -21,6 +21,7 @@ from app.postgres_db import (
     get_connection,
     json_safe,
     register_ingestion_attempt,
+    set_ingestion_source_path,
     set_ingestion_status,
 )
 
@@ -1645,6 +1646,7 @@ def main() -> int:
                 ingestion_id = register_ingestion_attempt(
                     entity=entity,
                     source_filename=first.filename,
+                    source_path=str(full_path.resolve(strict=False)),
                     source_year=first.source_year,
                     file_sha256=first.file_sha256 or None,
                     content_sha256=None,
@@ -1674,6 +1676,7 @@ def main() -> int:
             ingestion_id = register_ingestion_attempt(
                 entity=entity,
                 source_filename=first.filename,
+                source_path=str(full_path.resolve(strict=False)),
                 source_year=first.source_year,
                 file_sha256=first.file_sha256,
                 content_sha256=None,
@@ -1710,6 +1713,10 @@ def main() -> int:
         if retry_ingestion_id is not None:
 
             ingestion_id = retry_ingestion_id
+            set_ingestion_source_path(
+                ingestion_id=ingestion_id,
+                source_path=str(full_path.resolve(strict=False)),
+            )
 
             set_ingestion_status(
                 ingestion_id=ingestion_id,
@@ -1726,6 +1733,7 @@ def main() -> int:
             ingestion_id = register_ingestion_attempt(
                 entity=entity,
                 source_filename=first.filename,
+                source_path=str(full_path.resolve(strict=False)),
                 source_year=first.source_year,
                 file_sha256=first.file_sha256 or None,
                 content_sha256=None,

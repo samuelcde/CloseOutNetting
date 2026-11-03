@@ -32,6 +32,7 @@ from .parser import parse_report
 from .postgres_db import (
     find_persisted_ingestion_by_hash,
     register_ingestion_attempt,
+    set_ingestion_source_path,
     set_ingestion_status,
 )
 from .security import avoid_file_collision, build_safe_destination, sanitize_filename
@@ -431,6 +432,25 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             staging_destination, 
                             final_destination
                         )
+                        try:
+                            set_ingestion_source_path(
+                                ingestion_id=ingestion_id,
+                                source_path=str(final_destination),
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "No fue posible registrar source_path "
+                                "para ingestion_id=%s",
+                                ingestion_id,
+                            )
+                            cycle_incidents.append(
+                                "ERROR TRAZABILIDAD RUTA"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                f" | Ingestion ID: {ingestion_id}"
+                                f" | Ruta: {final_destination}"
+                                f" | Motivo: {type(exc).__name__}: {exc}"
+                            )
                         set_ingestion_status(
                             ingestion_id=ingestion_id,
                             status="unknown_entity",
@@ -569,6 +589,25 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             sha256,
                         )
                         os.replace(staging_destination, final_destination)
+                        try:
+                            set_ingestion_source_path(
+                                ingestion_id=ingestion_id,
+                                source_path=str(final_destination),
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "No fue posible registrar source_path "
+                                "para ingestion_id=%s",
+                                ingestion_id,
+                            )
+                            cycle_incidents.append(
+                                "ERROR TRAZABILIDAD RUTA"
+                                f" | Entidad: {entity}"
+                                f" | Archivo: {filename}"
+                                f" | Ingestion ID: {ingestion_id}"
+                                f" | Ruta: {final_destination}"
+                                f" | Motivo: {type(exc).__name__}: {exc}"
+                            )
 
                         mark_processed(
                             message_id=message_id,
@@ -717,6 +756,25 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                         sha256,
                     )
                     os.replace(staging_destination, final_destination)
+                    try:
+                        set_ingestion_source_path(
+                            ingestion_id=ingestion_id,
+                            source_path=str(final_destination),
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "No fue posible registrar source_path "
+                            "para ingestion_id=%s",
+                            ingestion_id,
+                        )
+                        cycle_incidents.append(
+                            "ERROR TRAZABILIDAD RUTA"
+                            f" | Entidad: {entity}"
+                            f" | Archivo: {filename}"
+                            f" | Ingestion ID: {ingestion_id}"
+                            f" | Ruta: {final_destination}"
+                            f" | Motivo: {type(exc).__name__}: {exc}"
+                        )
 
                     # ========================================================
                     # POSTGRESQL: INGESTION + TABLA ENTIDAD/OPERACIÓN
