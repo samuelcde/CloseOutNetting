@@ -13,8 +13,7 @@
   ],
   "allowed_extensions": [
     ".xlsx",
-    ".csv",
-    ".xls"
+    ".csv"
   ],
   "default_entity": "OTROS",
   "entities": {

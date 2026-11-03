@@ -109,6 +109,24 @@ def _existing_local_path(value: str | None) -> Path | None:
     return Path(value)
 
 
+
+def _archive_root(download_dir: Path) -> Path:
+    """
+    Obtiene la raiz de los archivos automatizados.
+
+    Si la configuracion apunta a closeoutnetting_pruebas,
+    utiliza su directorio padre.
+
+    No mueve archivos existentes.
+    """
+    root = Path(download_dir).resolve(strict=False)
+
+    if root.name.casefold() == "closeoutnetting_pruebas":
+        root = root.parent
+
+    return root
+
+
 def _resolve_final_destination(
     base_destination: Path,
     attachment_id: str,
@@ -299,14 +317,18 @@ def process_cycle(settings: Settings, config: OperationalConfig) -> int:
                             or datetime.now().year
                         )
 
+                        archive_root = _archive_root(
+                            settings.download_dir
+                        )
+
                         base_destination = build_safe_destination(
-                            settings.download_dir,
+                            archive_root,
                             entity,
                             filename,
                             download_year,
                         )
                         staging_destination = build_safe_destination(
-                            settings.download_dir,
+                            archive_root,
                             entity,
                             f".cln-{uuid.uuid4().hex}{extension}",
                             download_year,

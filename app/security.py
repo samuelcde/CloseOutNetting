@@ -108,7 +108,7 @@ def build_safe_destination(
             f"Año de descarga inválido: {source_year!r}"
         )
 
-    year_directory = root / str(source_year)
+    year_directory = root / f"{source_year}(a)"
 
     entity_directory = (
         year_directory / entity
